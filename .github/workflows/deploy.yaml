@@ -1,0 +1,40 @@
+name: Power BI CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify Power BI files exist
+        run: |
+          echo "Validating Power BI files..."
+          if [ -d "reports" ]; then
+            ls -la reports/
+            echo "✓ Reports directory verified"
+          else
+            echo "✗ Reports directory not found"
+            exit 1
+          fi
+
+      - name: Check for .pbix files
+        run: |
+          pbix_count=$(find reports -name "*.pbix" | wc -l)
+          if [ $pbix_count -gt 0 ]; then
+            echo "✓ Found $pbix_count Power BI file(s)"
+          else
+            echo "✗ No .pbix files found"
+            exit 1
+          fi
