@@ -79,7 +79,7 @@ jobs:
           fi
 
           echo "✅ PBIX file found"
-          ls -lh reports/sales-report.pbix
+          ls -lh reports/customer_sucess_report.pbix
 
       - name: Deploy to UAT
         run: |
