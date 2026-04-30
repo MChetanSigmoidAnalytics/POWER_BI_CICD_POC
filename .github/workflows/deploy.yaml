@@ -1,165 +1,117 @@
-name: Power BI Auth Debug toekn passing
+name: Power BI Auth Debug
 
 on:
   workflow_dispatch:
 
 jobs:
-  # ─────────────────────────────
-  # JOB 1: Validate Secrets exist
-  # ─────────────────────────────
   check-secrets:
     runs-on: ubuntu-latest
     steps:
       - name: Check Secrets Are Set
         run: |
-          echo "Checking secrets are configured..."
-          
           if [ -z "${{ secrets.TENANT_ID }}" ]; then
-            echo "❌ TENANT_ID is missing"
-            exit 1
+            echo "❌ TENANT_ID is missing"; exit 1
           else
-            echo "✅ TENANT_ID is set → length: ${#TENANT_ID}"
+            echo "✅ TENANT_ID is set"
           fi
-
           if [ -z "${{ secrets.CLIENT_ID }}" ]; then
-            echo "❌ CLIENT_ID is missing"
-            exit 1
+            echo "❌ CLIENT_ID is missing"; exit 1
           else
             echo "✅ CLIENT_ID is set"
           fi
-
           if [ -z "${{ secrets.CLIENT_SECRET }}" ]; then
-            echo "❌ CLIENT_SECRET is missing"
-            exit 1
+            echo "❌ CLIENT_SECRET is missing"; exit 1
           else
             echo "✅ CLIENT_SECRET is set"
           fi
 
-  # ─────────────────────────────
-  # JOB 2: Test Azure Token Fetch
-  # ─────────────────────────────
-  test-token:
+  test-auth:
     runs-on: ubuntu-latest
     needs: check-secrets
     steps:
       - name: Install jq
         run: sudo apt-get install -y jq
 
-      - name: Fetch Token with Full Response Debug
+      - name: Fetch Token and Test Power BI API
         run: |
           echo "──────────────────────────────────"
-          echo "Calling Azure AD token endpoint..."
+          echo "Step 1: Fetching token from Azure AD..."
           echo "──────────────────────────────────"
 
-          # Get FULL response first (not just token)
           FULL_RESPONSE=$(curl -s -X POST \
-            https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token \
+            "https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default")
 
-          echo "Raw Azure Response:"
-          echo $FULL_RESPONSE | jq .
+          echo "Azure Raw Response:"
+          echo "$FULL_RESPONSE" | jq .
 
-          # Check for error in response
-          ERROR=$(echo $FULL_RESPONSE | jq -r '.error // empty')
-          ERROR_DESC=$(echo $FULL_RESPONSE | jq -r '.error_description // empty')
-
+          # Check for azure error
+          ERROR=$(echo "$FULL_RESPONSE" | jq -r '.error // empty')
           if [ ! -z "$ERROR" ]; then
-            echo "❌ Azure token error: $ERROR"
-            echo "❌ Description: $ERROR_DESC"
+            echo "❌ Azure Error: $ERROR"
+            echo "❌ $(echo "$FULL_RESPONSE" | jq -r '.error_description')"
             exit 1
           fi
 
-          # Extract token
-          TOKEN=$(echo $FULL_RESPONSE | jq -r '.access_token')
+          TOKEN=$(echo "$FULL_RESPONSE" | jq -r '.access_token')
 
           if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-            echo "❌ Token is null or empty"
+            echo "❌ Token is empty or null"
             exit 1
           fi
 
-          # Print token details
-          TOKEN_LENGTH=${#TOKEN}
           echo "✅ Token fetched successfully"
-          echo "Token length: $TOKEN_LENGTH characters"
+          echo "Token length: ${#TOKEN}"
+          echo "Token preview: ${TOKEN:0:30}..."
 
-          # Decode token header and payload (without signature)
           echo "──────────────────────────────────"
-          echo "Token Claims (decoded):"
-          echo $TOKEN | cut -d'.' -f2 | base64 -d 2>/dev/null | jq . || echo "Could not decode token"
-          echo "──────────────────────────────────"
-
-          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
-
-      - name: Validate Token Expiry
-        run: |
-          EXP=$(echo $TOKEN | cut -d'.' -f2 | base64 -d 2>/dev/null | jq -r '.exp // empty')
-          NOW=$(date +%s)
-          
-          if [ ! -z "$EXP" ]; then
-            EXPIRES_IN=$((EXP - NOW))
-            echo "✅ Token expires in: $EXPIRES_IN seconds"
-          else
-            echo "⚠️ Could not check token expiry"
-          fi
-
-  # ─────────────────────────────
-  # JOB 3: Test Power BI API Call
-  # ─────────────────────────────
-  test-powerbi-api:
-    runs-on: ubuntu-latest
-    needs: test-token
-    steps:
-      - name: Install jq
-        run: sudo apt-get install -y jq
-
-      - name: Get Fresh Token
-        run: |
-          TOKEN=$(curl -s -X POST \
-            https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
-          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
-
-      - name: Test Power BI API with Full Debug
-        run: |
-          echo "──────────────────────────────────"
-          echo "Calling Power BI API..."
+          echo "Step 2: Decoding token claims..."
           echo "──────────────────────────────────"
 
-          # Call with verbose headers to see exact response
+          # Decode JWT payload
+          PAYLOAD=$(echo "$TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null || echo "decode failed")
+          echo "Token claims:"
+          echo "$PAYLOAD" | jq . 2>/dev/null || echo "$PAYLOAD"
+
+          echo "──────────────────────────────────"
+          echo "Step 3: Calling Power BI API..."
+          echo "──────────────────────────────────"
+
+          echo "Token being used: ${TOKEN:0:30}..."
+
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups" \
-            -H "Authorization: Bearer $TOKEN" \
+            -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json")
 
-          # Split body and status code
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
-          BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
+          BODY=$(echo "$RESPONSE" | grep -v "==HTTP_STATUS==")
 
-          echo "HTTP Status Code: $HTTP_STATUS"
+          echo "HTTP Status: $HTTP_STATUS"
           echo "Response Body:"
-          echo $BODY | jq . 2>/dev/null || echo "$BODY"
+          echo "$BODY" | jq . 2>/dev/null || echo "$BODY"
 
-          # Diagnose based on status code
           echo "──────────────────────────────────"
           case $HTTP_STATUS in
             200)
-              echo "✅ HTTP 200 - API call successful"
-              WORKSPACE_COUNT=$(echo $BODY | jq '.value | length')
+              WORKSPACE_COUNT=$(echo "$BODY" | jq '.value | length')
+              echo "✅ HTTP 200 - Auth working!"
               echo "✅ Workspaces visible to SP: $WORKSPACE_COUNT"
               ;;
             401)
               echo "❌ HTTP 401 - Unauthorized"
-              echo "   → Token is invalid or expired"
-              echo "   → Check CLIENT_SECRET hasn't expired in Azure"
+              echo "   Possible reasons:"
+              echo "   → CLIENT_SECRET expired in Azure"
+              echo "   → Wrong CLIENT_ID or TENANT_ID"
+              echo "   → Token audience mismatch"
               exit 1
               ;;
             403)
               echo "❌ HTTP 403 - Forbidden"
-              echo "   → Admin consent not fully propagated yet"
-              echo "   → OR Service principal not enabled in Power BI Admin"
-              echo "   → Wait 10 mins and retry"
+              echo "   Possible reasons:"
+              echo "   → Admin consent not fully propagated (wait 10 mins)"
+              echo "   → Service principal not enabled in Power BI Admin portal"
               exit 1
               ;;
             *)
