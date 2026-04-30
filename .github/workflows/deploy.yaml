@@ -1,4 +1,4 @@
-name: Power BI Auth Debug
+name: Power BI Auth Debug toekn passing
 
 on:
   workflow_dispatch:
