@@ -1,9 +1,6 @@
 name: Power BI CI/CD - UAT Deploy
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
