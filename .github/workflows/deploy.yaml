@@ -1,40 +1,43 @@
-name: Power BI CI/CD
+name: Power BI Auth Test
 
 on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:        
 
 jobs:
-  validate:
+  test-auth:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get install -y jq
 
-      - name: Verify Power BI files exist
+      - name: Get Token from Azure
         run: |
-          echo "Validating Power BI files..."
-          if [ -d "reports" ]; then
-            ls -la reports/
-            echo "✓ Reports directory verified"
-          else
-            echo "✗ Reports directory not found"
+          TOKEN=$(curl -s -X POST https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
+          
+          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+            echo "❌ Token fetch failed"
             exit 1
           fi
+          
+          echo "✅ Token fetched successfully"
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      - name: Check for .pbix files
+      - name: Verify Token against Power BI API
         run: |
-          pbix_count=$(find reports -name "*.pbix" | wc -l)
-          if [ $pbix_count -gt 0 ]; then
-            echo "✓ Found $pbix_count Power BI file(s)"
+          RESPONSE=$(curl -s -X GET "https://api.powerbi.com/v1.0/myorg/groups" \
+          -H "Authorization: Bearer $TOKEN")
+          
+          echo "Power BI API Response: $RESPONSE"
+          
+          # Check if response has value field (means auth worked)
+          if echo "$RESPONSE" | jq -e '.value' > /dev/null 2>&1; then
+            echo "✅ Auth successful - Power BI API is accessible"
           else
-            echo "✗ No .pbix files found"
+            echo "❌ Auth failed - Check API response above"
             exit 1
           fi
