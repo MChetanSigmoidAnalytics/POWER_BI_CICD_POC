@@ -1,10 +1,10 @@
-name: Power BI Auth Test
+name: Power BI Auth Test from azure to powerbi
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:        
+  workflow_dispatch:       
 
 jobs:
   test-auth:
