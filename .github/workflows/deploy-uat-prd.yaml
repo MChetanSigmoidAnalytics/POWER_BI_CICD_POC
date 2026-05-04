@@ -3,13 +3,14 @@ name: Power BI CI/CD Pipeline
 on:
   push:
     branches:
-      - main
+      - dev    # triggers dev deploy
+      - main   # triggers uat → prd deploy
   workflow_dispatch:
 
 jobs:
   # ─────────────────────────────
   # JOB 1: DEPLOY TO DEV
-  # auto deploys on push to dev
+  # push to dev → auto deploy
   # no approval needed
   # ─────────────────────────────
   deploy-dev:
@@ -88,12 +89,12 @@ jobs:
 
   # ─────────────────────────────
   # JOB 2: DEPLOY TO UAT
-  # triggers on merge to main
-  # requires approval
+  # merge dev to main → auto deploy to UAT first
+  # then waits for approval before PRD
   # ─────────────────────────────
   deploy-uat:
     runs-on: ubuntu-latest
-    environment: UAT          # ← approval gate
+    environment: UAT          # ← approval gate for UAT
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v3
@@ -168,12 +169,12 @@ jobs:
 
   # ─────────────────────────────
   # JOB 3: DEPLOY TO PRD
-  # only runs after UAT succeeds
-  # requires approval
+  # only after UAT succeeds
+  # requires approval gate
   # ─────────────────────────────
   deploy-prd:
     runs-on: ubuntu-latest
-    environment: PRD          # ← approval gate
+    environment: PRD          # ← approval gate for PRD
     needs: deploy-uat         # ← UAT must pass first
     if: github.ref == 'refs/heads/main'
     steps:
