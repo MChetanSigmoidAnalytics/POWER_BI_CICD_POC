@@ -1,4 +1,4 @@
-name: Power BI CI/CD - UAT Deploy
+name: Power BI CI/CD - UAT & PRD Deploy
 
 on:
   push:
@@ -7,8 +7,12 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ─────────────────────────────
+  # JOB 1: DEPLOY TO UAT
+  # ─────────────────────────────
   deploy-uat:
     runs-on: ubuntu-latest
+    environment: UAT
     steps:
       - uses: actions/checkout@v3
 
@@ -30,7 +34,7 @@ jobs:
           echo "✅ Token fetched successfully"
           echo "TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      - name: Verify Workspace Access
+      - name: Verify UAT Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}" \
@@ -38,9 +42,6 @@ jobs:
 
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
-
-          echo "HTTP Status: $HTTP_STATUS"
-          echo "$BODY" | jq . 2>/dev/null || echo "$BODY"
 
           if [ "$HTTP_STATUS" != "200" ]; then
             echo "❌ Cannot access UAT workspace - Status: $HTTP_STATUS"
@@ -53,13 +54,10 @@ jobs:
       - name: Check PBIX File
         run: |
           if [ ! -f "reports/customer_sucess_report.pbix" ]; then
-            echo "❌ File not found at reports/customer_sucess_report.pbix"
-            echo "Files in reports/:"
-            ls -la reports/ 2>/dev/null || echo "reports/ folder missing"
+            echo "❌ File not found"
             exit 1
           fi
           echo "✅ PBIX file found"
-          ls -lh reports/customer_sucess_report.pbix
 
       - name: Deploy to UAT
         run: |
@@ -82,20 +80,88 @@ jobs:
               echo "✅ Deployed successfully to UAT!"
               echo "Import ID: $IMPORT_ID"
               ;;
-            400)
-              echo "❌ 400 - Bad request"
+            *)
+              echo "❌ UAT Deploy failed - Status: $HTTP_STATUS"
               exit 1
               ;;
-            401)
-              echo "❌ 401 - Unauthorized - check SP access"
-              exit 1
-              ;;
-            403)
-              echo "❌ 403 - Forbidden - check SP role in workspace"
-              exit 1
+          esac
+
+  # ─────────────────────────────
+  # JOB 2: DEPLOY TO PRD
+  # ─────────────────────────────
+  deploy-prd:
+    runs-on: ubuntu-latest
+    environment: PRD          # ← approval gate triggers here
+    needs: deploy-uat         # ← UAT must pass first
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Get Token
+        run: |
+          TOKEN=$(curl -s -X POST \
+            https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
+
+          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+            echo "❌ Token fetch failed"
+            exit 1
+          fi
+
+          echo "✅ Token fetched successfully"
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      - name: Verify PRD Workspace Access
+        run: |
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}" \
+            -H "Authorization: Bearer $TOKEN")
+
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Cannot access PRD workspace - Status: $HTTP_STATUS"
+            exit 1
+          fi
+
+          WORKSPACE_NAME=$(echo "$BODY" | jq -r '.name')
+          echo "✅ Workspace accessible: $WORKSPACE_NAME"
+
+      - name: Check PBIX File
+        run: |
+          if [ ! -f "reports/customer_sucess_report.pbix" ]; then
+            echo "❌ File not found"
+            exit 1
+          fi
+          echo "✅ PBIX file found"
+
+      - name: Deploy to PRD
+        run: |
+          echo "=== Deploying to PRD ==="
+
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/imports?datasetDisplayName=CustomerSuccessReport&nameConflict=CreateOrOverwrite" \
+            -H "Authorization: Bearer $TOKEN" \
+            -F "file=@reports/customer_sucess_report.pbix")
+
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
+
+          echo "HTTP Status: $HTTP_STATUS"
+          echo "$BODY" | jq . 2>/dev/null || echo "$BODY"
+
+          case $HTTP_STATUS in
+            200|202)
+              IMPORT_ID=$(echo "$BODY" | jq -r '.id')
+              echo "✅ Deployed successfully to PRD!"
+              echo "Import ID: $IMPORT_ID"
               ;;
             *)
-              echo "❌ Unexpected status: $HTTP_STATUS"
+              echo "❌ PRD Deploy failed - Status: $HTTP_STATUS"
               exit 1
               ;;
           esac
