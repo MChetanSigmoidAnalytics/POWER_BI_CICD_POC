@@ -1,6 +1,8 @@
 name: Test DEV Workspace Access
-
 on:
+  push:
+    branches:
+      - dev
   workflow_dispatch:
 
 jobs:
