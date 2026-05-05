@@ -11,7 +11,7 @@ runs:
   steps:
     - name: Install jq
       shell: bash
-      run: sudo apt-get install -y jq
+      run: sudo apt-get install -y jq -q  # -q suppresses install logs
 
     - name: Fetch Token
       id: fetch-token
@@ -23,9 +23,11 @@ runs:
           -d "client_id=${{ env.CLIENT_ID }}&client_secret=${{ env.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
 
         if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-          echo " Token fetch failed"
+          echo "::error::Token fetch failed - check CLIENT_ID, CLIENT_SECRET, TENANT_ID"
           exit 1
         fi
 
-        echo "Token fetched successfully"
+        # mask token so it never appears in logs
+        echo "::add-mask::$TOKEN"
+        echo "::notice::Token fetched successfully"
         echo "token=$TOKEN" >> $GITHUB_OUTPUT
