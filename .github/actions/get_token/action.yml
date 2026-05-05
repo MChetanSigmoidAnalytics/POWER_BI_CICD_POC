@@ -1,0 +1,31 @@
+name: Get Power BI Token
+description: Fetches Azure AD token for Power BI API
+
+outputs:
+  token:
+    description: Power BI Bearer Token
+    value: ${{ steps.fetch-token.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install jq
+      shell: bash
+      run: sudo apt-get install -y jq
+
+    - name: Fetch Token
+      id: fetch-token
+      shell: bash
+      run: |
+        TOKEN=$(curl -s -X POST \
+          https://login.microsoftonline.com/${{ env.TENANT_ID }}/oauth2/v2.0/token \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "client_id=${{ env.CLIENT_ID }}&client_secret=${{ env.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
+
+        if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+          echo " Token fetch failed"
+          exit 1
+        fi
+
+        echo "Token fetched successfully"
+        echo "token=$TOKEN" >> $GITHUB_OUTPUT

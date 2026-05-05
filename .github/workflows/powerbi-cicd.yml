@@ -15,33 +15,24 @@ jobs:
   # ─────────────────────────────
   deploy-dev:
     runs-on: ubuntu-latest
+    environment: dev
     if: github.ref == 'refs/heads/dev'
+    env:
+      TENANT_ID:     ${{ secrets.TENANT_ID }}
+      CLIENT_ID:     ${{ secrets.CLIENT_ID }}
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install jq
-        run: sudo apt-get install -y jq
-
       - name: Get Token
-        run: |
-          TOKEN=$(curl -s -X POST \
-            https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
-
-          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-            echo "❌ Token fetch failed"
-            exit 1
-          fi
-
-          echo "✅ Token fetched successfully"
-          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+        id: auth
+        uses: ./.github/actions/get-token
 
       - name: Verify DEV Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}" \
-            -H "Authorization: Bearer $TOKEN")
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
 
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
@@ -51,7 +42,7 @@ jobs:
             exit 1
           fi
 
-          echo "✅ Workspace accessible: $(echo $BODY | jq -r '.name')"
+          echo "Workspace accessible: $(echo $BODY | jq -r '.name')"
 
       - name: Check PBIX File
         run: |
@@ -59,7 +50,7 @@ jobs:
             echo "❌ PBIX file not found"
             exit 1
           fi
-          echo "✅ PBIX file found"
+          echo " PBIX file found"
 
       - name: Deploy to DEV
         run: |
@@ -67,7 +58,7 @@ jobs:
 
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/imports?datasetDisplayName=CustomerSuccessReport&nameConflict=CreateOrOverwrite" \
-            -H "Authorization: Bearer $TOKEN" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
             -F "file=@reports/customer_sucess_report.pbix")
 
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
@@ -78,7 +69,7 @@ jobs:
 
           case $HTTP_STATUS in
             200|202)
-              echo "✅ Deployed successfully to DEV!"
+              echo "Deployed successfully to DEV!"
               echo "Import ID: $(echo $BODY | jq -r '.id')"
               ;;
             *)
@@ -93,52 +84,42 @@ jobs:
   # ─────────────────────────────
   deploy-uat:
     runs-on: ubuntu-latest
-    environment: UAT
+    environment: uat
     if: github.ref == 'refs/heads/main'
+    env:
+      TENANT_ID:     ${{ secrets.TENANT_ID }}
+      CLIENT_ID:     ${{ secrets.CLIENT_ID }}
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install jq
-        run: sudo apt-get install -y jq
-
       - name: Get Token
-        run: |
-          TOKEN=$(curl -s -X POST \
-            https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
-
-          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-            echo "❌ Token fetch failed"
-            exit 1
-          fi
-
-          echo "✅ Token fetched successfully"
-          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+        id: auth
+        uses: ./.github/actions/get-token
 
       - name: Verify UAT Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}" \
-            -H "Authorization: Bearer $TOKEN")
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
 
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
 
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "❌ Cannot access UAT workspace - Status: $HTTP_STATUS"
+            echo "Cannot access UAT workspace - Status: $HTTP_STATUS"
             exit 1
           fi
 
-          echo "✅ Workspace accessible: $(echo $BODY | jq -r '.name')"
+          echo "Workspace accessible: $(echo $BODY | jq -r '.name')"
 
       - name: Check PBIX File
         run: |
           if [ ! -f "reports/customer_sucess_report.pbix" ]; then
-            echo "❌ PBIX file not found"
+            echo " PBIX file not found"
             exit 1
           fi
-          echo "✅ PBIX file found"
+          echo " PBIX file found"
 
       - name: Deploy to UAT
         run: |
@@ -146,7 +127,7 @@ jobs:
 
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/imports?datasetDisplayName=CustomerSuccessReport&nameConflict=CreateOrOverwrite" \
-            -H "Authorization: Bearer $TOKEN" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
             -F "file=@reports/customer_sucess_report.pbix")
 
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
@@ -157,11 +138,11 @@ jobs:
 
           case $HTTP_STATUS in
             200|202)
-              echo "✅ Deployed successfully to UAT!"
+              echo "Deployed successfully to UAT!"
               echo "Import ID: $(echo $BODY | jq -r '.id')"
               ;;
             *)
-              echo "❌ UAT Deploy failed - Status: $HTTP_STATUS"
+              echo " UAT Deploy failed - Status: $HTTP_STATUS"
               exit 1
               ;;
           esac
@@ -173,45 +154,35 @@ jobs:
   # ─────────────────────────────
   deploy-prd:
     runs-on: ubuntu-latest
-    environment: PRD
+    environment: prd
     needs: deploy-uat
     if: github.ref == 'refs/heads/main'
+    env:
+      TENANT_ID:     ${{ secrets.TENANT_ID }}
+      CLIENT_ID:     ${{ secrets.CLIENT_ID }}
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install jq
-        run: sudo apt-get install -y jq
-
       - name: Get Token
-        run: |
-          TOKEN=$(curl -s -X POST \
-            https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
-
-          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-            echo "❌ Token fetch failed"
-            exit 1
-          fi
-
-          echo "✅ Token fetched successfully"
-          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+        id: auth
+        uses: ./.github/actions/get-token
 
       - name: Verify PRD Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}" \
-            -H "Authorization: Bearer $TOKEN")
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
 
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
 
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "❌ Cannot access PRD workspace - Status: $HTTP_STATUS"
+            echo " Cannot access PRD workspace - Status: $HTTP_STATUS"
             exit 1
           fi
 
-          echo "✅ Workspace accessible: $(echo $BODY | jq -r '.name')"
+          echo "Workspace accessible: $(echo $BODY | jq -r '.name')"
 
       - name: Check PBIX File
         run: |
@@ -219,7 +190,7 @@ jobs:
             echo "❌ PBIX file not found"
             exit 1
           fi
-          echo "✅ PBIX file found"
+          echo " PBIX file found"
 
       - name: Deploy to PRD
         run: |
@@ -227,7 +198,7 @@ jobs:
 
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/imports?datasetDisplayName=CustomerSuccessReport&nameConflict=CreateOrOverwrite" \
-            -H "Authorization: Bearer $TOKEN" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
             -F "file=@reports/customer_sucess_report.pbix")
 
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
@@ -238,11 +209,11 @@ jobs:
 
           case $HTTP_STATUS in
             200|202)
-              echo "✅ Deployed successfully to PRD!"
+              echo " Deployed successfully to PRD!"
               echo "Import ID: $(echo $BODY | jq -r '.id')"
               ;;
             *)
-              echo "❌ PRD Deploy failed - Status: $HTTP_STATUS"
+              echo " PRD Deploy failed - Status: $HTTP_STATUS"
               exit 1
               ;;
           esac
