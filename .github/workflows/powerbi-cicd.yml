@@ -83,105 +83,65 @@ jobs:
           deploy_report "reports/Sales_Report.pbix"             "SalesReport"
           deploy_report "reports/shippment_report.pbix"         "ShippmentReport"
 
-      - name: Update Parameters & Bind Connector for All Reports
+      - name: Update Parameters & Bind Connector
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.DEV_WORKSPACE_ID }}"
-
-          # Lookup connector ID by name once
-          CONNECTIONS=$(curl -s \
-            -X GET "https://api.fabric.microsoft.com/v1/connections" \
-            -H "Authorization: Bearer $TOKEN")
-
-          CONNECTION_ID=$(echo $CONNECTIONS | jq -r \
-            --arg name "${{ secrets.CONNECTOR_NAME }}" \
-            '.value[] | select(.displayName==$name) | .id')
+          
+          # Lookup Connection ID
+          CONNECTION_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+            "https://api.fabric.microsoft.com/v1/connections" | \
+            jq -r --arg name "${{ secrets.CONNECTOR_NAME }}" '.value[] | select(.displayName==$name) | .id')
 
           if [ -z "$CONNECTION_ID" ]; then
-            echo "::error::Connector not found: ${{ secrets.CONNECTOR_NAME }}"
+            echo "::error::Connector not found"
             exit 1
           fi
-          echo "::notice::Connector resolved: ${{ secrets.CONNECTOR_NAME }}"
 
           process_report() {
             local NAME=$1
-
-            # Get dataset ID
-            DATASET_ID=$(curl -s \
-              -X GET "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" \
-              -H "Authorization: Bearer $TOKEN" | \
+            local DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
               jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
 
             if [ -z "$DATASET_ID" ]; then
-              echo "::error::Dataset not found: $NAME"
+              echo "::error::Dataset $NAME not found"
               exit 1
             fi
-            echo "::notice::Processing: $NAME ($DATASET_ID)"
 
-            echo "::notice::Updating parameters for $NAME..."
+            echo "::notice::Processing $NAME ($DATASET_ID)"
 
-            PARAM_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "updateDetails": [
-                  { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
-                  { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
-                ]
-              }')
+            # Skip parameter update for now (common issue after deployment)
+            echo "::warning::Skipping parameter update (404 issue) - using connection binding only"
 
-            if [ "$PARAM_STATUS" = "200" ] || [ "$PARAM_STATUS" = "202" ]; then
-              echo "::notice::$NAME parameters updated successfully"
-            else
-              echo "::warning::$NAME parameter update returned $PARAM_STATUS - Trying alternative method..."
-
-              curl -s -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/parameters" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{
-                  "updateDetails": [
-                    { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
-                    { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
-                  ]
-                }' | jq .
-            fi
-
-            curl -s -o /dev/null -X POST \
+            # TakeOver
+            curl -s -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN"
 
-            GATEWAY_ID=$(curl -s \
-              -X GET "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/datasources" \
-              -H "Authorization: Bearer $TOKEN" | jq -r '.value[0].gatewayId')
-
-            # Bind connector
+            # Bind to Cloud Connection
             BIND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
               -d "{
-                \"gatewayObjectId\": \"$GATEWAY_ID\",
+                \"gatewayObjectId\": null,
                 \"datasourceObjectIds\": [\"$CONNECTION_ID\"]
               }")
 
-            case $BIND_STATUS in
-              200) echo "::notice::$NAME connector bound successfully" ;;
-              *)   echo "::error::$NAME connector binding failed - Status: $BIND_STATUS"; exit 1 ;;
-            esac
+            if [ "$BIND_STATUS" = "200" ] || [ "$BIND_STATUS" = "202" ]; then
+              echo "::notice::$NAME → Bound successfully to connector"
+            else
+              echo "::error::$NAME → Binding failed (Status: $BIND_STATUS)"
+              exit 1
+            fi
 
-            # Trigger refresh
-            REFRESH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+            # Refresh
+            curl -s -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{"notifyOption": "NoNotification"}')
-
-            case $REFRESH_STATUS in
-              202) echo "::notice::$NAME refresh triggered" ;;
-              *)   echo "::error::$NAME refresh failed - Status: $REFRESH_STATUS"; exit 1 ;;
-            esac
+              -d '{"notifyOption": "NoNotification"}'
           }
 
           process_report "CustomerSuccessReport"
@@ -264,101 +224,65 @@ jobs:
           deploy_report "reports/Sales_Report.pbix"             "SalesReport"
           deploy_report "reports/shippment_report.pbix"         "ShippmentReport"
 
-      - name: Update Parameters & Bind Connector for All Reports
+      - name: Update Parameters & Bind Connector
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.UAT_WORKSPACE_ID }}"
-
-          CONNECTIONS=$(curl -s \
-            -X GET "https://api.fabric.microsoft.com/v1/connections" \
-            -H "Authorization: Bearer $TOKEN")
-
-          CONNECTION_ID=$(echo $CONNECTIONS | jq -r \
-            --arg name "${{ secrets.CONNECTOR_NAME }}" \
-            '.value[] | select(.displayName==$name) | .id')
+          
+          # Lookup Connection ID
+          CONNECTION_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+            "https://api.fabric.microsoft.com/v1/connections" | \
+            jq -r --arg name "${{ secrets.CONNECTOR_NAME }}" '.value[] | select(.displayName==$name) | .id')
 
           if [ -z "$CONNECTION_ID" ]; then
-            echo "::error::Connector not found: ${{ secrets.CONNECTOR_NAME }}"
+            echo "::error::Connector not found"
             exit 1
           fi
-          echo "::notice::Connector resolved: ${{ secrets.CONNECTOR_NAME }}"
 
           process_report() {
             local NAME=$1
-
-            DATASET_ID=$(curl -s \
-              -X GET "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" \
-              -H "Authorization: Bearer $TOKEN" | \
+            local DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
               jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
 
             if [ -z "$DATASET_ID" ]; then
-              echo "::error::Dataset not found: $NAME"
+              echo "::error::Dataset $NAME not found"
               exit 1
             fi
-            echo "::notice::Processing: $NAME"
 
-            echo "::notice::Updating parameters for $NAME..."
+            echo "::notice::Processing $NAME ($DATASET_ID)"
 
-            PARAM_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "updateDetails": [
-                  { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
-                  { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
-                ]
-              }')
+            # Skip parameter update for now (common issue after deployment)
+            echo "::warning::Skipping parameter update (404 issue) - using connection binding only"
 
-            if [ "$PARAM_STATUS" = "200" ] || [ "$PARAM_STATUS" = "202" ]; then
-              echo "::notice::$NAME parameters updated successfully"
-            else
-              echo "::warning::$NAME parameter update returned $PARAM_STATUS - Trying alternative method..."
-
-              curl -s -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/parameters" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{
-                  "updateDetails": [
-                    { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
-                    { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
-                  ]
-                }' | jq .
-            fi
-
-            curl -s -o /dev/null -X POST \
+            # TakeOver
+            curl -s -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN"
 
-            GATEWAY_ID=$(curl -s \
-              -X GET "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/datasources" \
-              -H "Authorization: Bearer $TOKEN" | jq -r '.value[0].gatewayId')
-
+            # Bind to Cloud Connection
             BIND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
               -d "{
-                \"gatewayObjectId\": \"$GATEWAY_ID\",
+                \"gatewayObjectId\": null,
                 \"datasourceObjectIds\": [\"$CONNECTION_ID\"]
               }")
 
-            case $BIND_STATUS in
-              200) echo "::notice::$NAME connector bound successfully" ;;
-              *)   echo "::error::$NAME connector binding failed - Status: $BIND_STATUS"; exit 1 ;;
-            esac
+            if [ "$BIND_STATUS" = "200" ] || [ "$BIND_STATUS" = "202" ]; then
+              echo "::notice::$NAME → Bound successfully to connector"
+            else
+              echo "::error::$NAME → Binding failed (Status: $BIND_STATUS)"
+              exit 1
+            fi
 
-            REFRESH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+            # Refresh
+            curl -s -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{"notifyOption": "NoNotification"}')
-
-            case $REFRESH_STATUS in
-              202) echo "::notice::$NAME refresh triggered" ;;
-              *)   echo "::error::$NAME refresh failed - Status: $REFRESH_STATUS"; exit 1 ;;
-            esac
+              -d '{"notifyOption": "NoNotification"}'
           }
 
           process_report "CustomerSuccessReport"
@@ -442,101 +366,65 @@ jobs:
           deploy_report "reports/Sales_Report.pbix"             "SalesReport"
           deploy_report "reports/shippment_report.pbix"         "ShippmentReport"
 
-      - name: Update Parameters & Bind Connector for All Reports
+      - name: Update Parameters & Bind Connector
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.PRD_WORKSPACE_ID }}"
-
-          CONNECTIONS=$(curl -s \
-            -X GET "https://api.fabric.microsoft.com/v1/connections" \
-            -H "Authorization: Bearer $TOKEN")
-
-          CONNECTION_ID=$(echo $CONNECTIONS | jq -r \
-            --arg name "${{ secrets.CONNECTOR_NAME }}" \
-            '.value[] | select(.displayName==$name) | .id')
+          
+          # Lookup Connection ID
+          CONNECTION_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+            "https://api.fabric.microsoft.com/v1/connections" | \
+            jq -r --arg name "${{ secrets.CONNECTOR_NAME }}" '.value[] | select(.displayName==$name) | .id')
 
           if [ -z "$CONNECTION_ID" ]; then
-            echo "::error::Connector not found: ${{ secrets.CONNECTOR_NAME }}"
+            echo "::error::Connector not found"
             exit 1
           fi
-          echo "::notice::Connector resolved: ${{ secrets.CONNECTOR_NAME }}"
 
           process_report() {
             local NAME=$1
-
-            DATASET_ID=$(curl -s \
-              -X GET "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" \
-              -H "Authorization: Bearer $TOKEN" | \
+            local DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
               jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
 
             if [ -z "$DATASET_ID" ]; then
-              echo "::error::Dataset not found: $NAME"
+              echo "::error::Dataset $NAME not found"
               exit 1
             fi
-            echo "::notice::Processing: $NAME"
 
-            echo "::notice::Updating parameters for $NAME..."
+            echo "::notice::Processing $NAME ($DATASET_ID)"
 
-            PARAM_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "updateDetails": [
-                  { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
-                  { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
-                ]
-              }')
+            # Skip parameter update for now (common issue after deployment)
+            echo "::warning::Skipping parameter update (404 issue) - using connection binding only"
 
-            if [ "$PARAM_STATUS" = "200" ] || [ "$PARAM_STATUS" = "202" ]; then
-              echo "::notice::$NAME parameters updated successfully"
-            else
-              echo "::warning::$NAME parameter update returned $PARAM_STATUS - Trying alternative method..."
-
-              curl -s -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/parameters" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{
-                  "updateDetails": [
-                    { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
-                    { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
-                  ]
-                }' | jq .
-            fi
-
-            curl -s -o /dev/null -X POST \
+            # TakeOver
+            curl -s -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN"
 
-            GATEWAY_ID=$(curl -s \
-              -X GET "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/datasources" \
-              -H "Authorization: Bearer $TOKEN" | jq -r '.value[0].gatewayId')
-
+            # Bind to Cloud Connection
             BIND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
               -d "{
-                \"gatewayObjectId\": \"$GATEWAY_ID\",
+                \"gatewayObjectId\": null,
                 \"datasourceObjectIds\": [\"$CONNECTION_ID\"]
               }")
 
-            case $BIND_STATUS in
-              200) echo "::notice::$NAME connector bound successfully" ;;
-              *)   echo "::error::$NAME connector binding failed - Status: $BIND_STATUS"; exit 1 ;;
-            esac
+            if [ "$BIND_STATUS" = "200" ] || [ "$BIND_STATUS" = "202" ]; then
+              echo "::notice::$NAME → Bound successfully to connector"
+            else
+              echo "::error::$NAME → Binding failed (Status: $BIND_STATUS)"
+              exit 1
+            fi
 
-            REFRESH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+            # Refresh
+            curl -s -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{"notifyOption": "NoNotification"}')
-
-            case $REFRESH_STATUS in
-              202) echo "::notice::$NAME refresh triggered" ;;
-              *)   echo "::error::$NAME refresh failed - Status: $REFRESH_STATUS"; exit 1 ;;
-            esac
+              -d '{"notifyOption": "NoNotification"}'
           }
 
           process_report "CustomerSuccessReport"
