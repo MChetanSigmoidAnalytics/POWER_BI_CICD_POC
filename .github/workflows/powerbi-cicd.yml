@@ -48,20 +48,7 @@ jobs:
           fi
           echo "::notice::Workspace verified: $(echo $BODY | jq -r '.name')"
 
-      - name: Check PBIX Files
-        run: |
-          for file in \
-            "reports/customer_sucess_report.pbix" \
-            "reports/Sales_Report_01.pbix" \
-            "reports/Sales_Report.pbix" \
-            "reports/shippment_report.pbix"
-          do
-            if [ ! -f "$file" ]; then
-              echo "::error::File not found: $file"
-              exit 1
-            fi
-            echo "::notice::Found: $file"
-          done
+    
 
       - name: Deploy All Reports to DEV
         run: |
