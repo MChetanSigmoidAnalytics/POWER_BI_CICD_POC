@@ -112,22 +112,21 @@ jobs:
 
             echo "::notice::Processing: $NAME ($DATASET_ID)"
 
-            # Skip parameters for now
-            echo "::warning::Skipping parameter update due to 404 issue"
+            echo "::warning::Skipping parameter update (known issue after deployment)"
 
             # TakeOver
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN"
 
-            # Bind Cloud Connection
+            # Bind Cloud Connection - CORRECT PAYLOAD
             echo "::notice::Binding $NAME to cloud connector..."
             
             BIND_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{\n                "gatewayObjectId": null,\n                "datasourceObjectIds": ["'"$CONNECTION_ID"'"]\n              }')
+              -d '{\n                "datasourceObjectIds": ["'"$CONNECTION_ID"'"]\n              }')
 
             BIND_STATUS=$(echo "$BIND_RESPONSE" | grep "HTTP_STATUS:" | sed 's/HTTP_STATUS://')
             BODY=$(echo "$BIND_RESPONSE" | sed '/HTTP_STATUS:/d')
@@ -140,13 +139,6 @@ jobs:
               exit 1
             fi
 
-            # Refresh
-            echo "::notice::Triggering refresh for $NAME..."
-            curl -s -o /dev/null -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"notifyOption": "NoNotification"}'
           }
 
           process_report "CustomerSuccessReport"
@@ -258,22 +250,21 @@ jobs:
 
             echo "::notice::Processing: $NAME ($DATASET_ID)"
 
-            # Skip parameters for now
-            echo "::warning::Skipping parameter update due to 404 issue"
+            echo "::warning::Skipping parameter update (known issue after deployment)"
 
             # TakeOver
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN"
 
-            # Bind Cloud Connection
+            # Bind Cloud Connection - CORRECT PAYLOAD
             echo "::notice::Binding $NAME to cloud connector..."
             
             BIND_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{\n                "gatewayObjectId": null,\n                "datasourceObjectIds": ["'"$CONNECTION_ID"'"]\n              }')
+              -d '{\n                "datasourceObjectIds": ["'"$CONNECTION_ID"'"]\n              }')
 
             BIND_STATUS=$(echo "$BIND_RESPONSE" | grep "HTTP_STATUS:" | sed 's/HTTP_STATUS://')
             BODY=$(echo "$BIND_RESPONSE" | sed '/HTTP_STATUS:/d')
@@ -405,22 +396,21 @@ jobs:
 
             echo "::notice::Processing: $NAME ($DATASET_ID)"
 
-            # Skip parameters for now
-            echo "::warning::Skipping parameter update due to 404 issue"
+            echo "::warning::Skipping parameter update (known issue after deployment)"
 
             # TakeOver
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN"
 
-            # Bind Cloud Connection
+            # Bind Cloud Connection - CORRECT PAYLOAD
             echo "::notice::Binding $NAME to cloud connector..."
             
             BIND_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{\n                "gatewayObjectId": null,\n                "datasourceObjectIds": ["'"$CONNECTION_ID"'"]\n              }')
+              -d '{\n                "datasourceObjectIds": ["'"$CONNECTION_ID"'"]\n              }')
 
             BIND_STATUS=$(echo "$BIND_RESPONSE" | grep "HTTP_STATUS:" | sed 's/HTTP_STATUS://')
             BODY=$(echo "$BIND_RESPONSE" | sed '/HTTP_STATUS:/d')
