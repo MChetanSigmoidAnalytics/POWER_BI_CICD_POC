@@ -8,6 +8,9 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ─────────────────────────────
+  # DEPLOY TO DEV
+  # ─────────────────────────────
   deploy-dev:
     runs-on: ubuntu-latest
     environment: dev
@@ -19,65 +22,40 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # Important for detecting changed files
 
       - name: Get Token
         id: auth
         uses: ./.github/actions/get-token
 
-      - name: Get Changed PBIX Files
-        id: changed-files
-        run: |
-          echo "=== Changed PBIX files ==="
-          CHANGED_FILES=$(git diff --name-only HEAD^ HEAD | grep -E '\.pbix$' || echo "")
-          
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "No PBIX files changed. Skipping deployment."
-            echo "deploy=false" >> $GITHUB_OUTPUT
-          else
-            echo "Changed files:"
-            echo "$CHANGED_FILES"
-            echo "deploy=true" >> $GITHUB_OUTPUT
-            echo "files<<EOF" >> $GITHUB_OUTPUT
-            echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Deploy Changed Reports to DEV
-        if: steps.changed-files.outputs.deploy == 'true'
+      - name: Deploy All Reports to DEV
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.DEV_WORKSPACE_ID }}"
           
-          deploy_report() {
-            local FILE=$1
-            local NAME=$(basename "$FILE" .pbix)
-            echo "=== Deploying $NAME ==="
-            
-            RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
-              -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
-              -H "Authorization: Bearer $TOKEN" \
-              -F "file=@$FILE")
-            
-            HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
-            if [[ "$HTTP_STATUS" == 200 || "$HTTP_STATUS" == 202 ]]; then
-              echo "::notice::$NAME deployed successfully"
-            else
-              echo "::error::$NAME deploy failed - Status: $HTTP_STATUS"
-              exit 1
-            fi
-          }
+          echo "=== Deploying all reports from reports/ folder ==="
           
-          # Deploy only changed files
-          echo "${{ steps.changed-files.outputs.files }}" | while read -r file; do
-            if [ -n "$file" ] && [ -f "$file" ]; then
-              deploy_report "$file"
+          for file in reports/*.pbix; do
+            if [ -f "$file" ]; then
+              NAME=$(basename "$file" .pbix)
+              echo "=== Deploying $NAME ==="
+              
+              RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+                -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
+                -H "Authorization: Bearer $TOKEN" \
+                -F "file=@$file")
+              
+              HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+              
+              if [[ "$HTTP_STATUS" == 200 || "$HTTP_STATUS" == 202 ]]; then
+                echo "::notice::$NAME deployed successfully"
+              else
+                echo "::error::$NAME deploy failed - Status: $HTTP_STATUS"
+                exit 1
+              fi
             fi
           done
 
-      - name: TakeOver + Refresh Datasets
-        if: steps.changed-files.outputs.deploy == 'true'
+      - name: TakeOver + Refresh All Datasets
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.DEV_WORKSPACE_ID }}"
@@ -89,7 +67,7 @@ jobs:
               jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
             
             if [ -z "$DATASET_ID" ]; then
-              echo "::warning::Dataset not found: $NAME (might be new name)"
+              echo "::warning::Dataset not found: $NAME"
               return
             fi
             
@@ -109,7 +87,6 @@ jobs:
               -d '{"notifyOption": "NoNotification"}'
           }
           
-          # Process all reports (in case name didn't change)
           process_report "CustomerSuccessReport"
           process_report "SalesReport01"
           process_report "SalesReport"
