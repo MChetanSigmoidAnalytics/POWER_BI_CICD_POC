@@ -118,7 +118,8 @@ jobs:
             fi
             echo "::notice::Processing: $NAME ($DATASET_ID)"
 
-            # Update parameters
+            echo "::notice::Updating parameters for $NAME..."
+
             PARAM_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
               -H "Authorization: Bearer $TOKEN" \
@@ -130,17 +131,27 @@ jobs:
                 ]
               }')
 
-            case $PARAM_STATUS in
-              200) echo "::notice::$NAME parameters updated" ;;
-              *)   echo "::notice::$NAME parameter update skipped - Status: $PARAM_STATUS" ;;
-            esac
+            if [ "$PARAM_STATUS" = "200" ] || [ "$PARAM_STATUS" = "202" ]; then
+              echo "::notice::$NAME parameters updated successfully"
+            else
+              echo "::warning::$NAME parameter update returned $PARAM_STATUS - Trying alternative method..."
 
-            # Takeover datasource
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/parameters" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "updateDetails": [
+                    { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
+                    { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
+                  ]
+                }' | jq .
+            fi
+
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN"
 
-            # Get gateway ID
             GATEWAY_ID=$(curl -s \
               -X GET "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/datasources" \
               -H "Authorization: Bearer $TOKEN" | jq -r '.value[0].gatewayId')
@@ -286,6 +297,8 @@ jobs:
             fi
             echo "::notice::Processing: $NAME"
 
+            echo "::notice::Updating parameters for $NAME..."
+
             PARAM_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
               -H "Authorization: Bearer $TOKEN" \
@@ -297,10 +310,22 @@ jobs:
                 ]
               }')
 
-            case $PARAM_STATUS in
-              200) echo "::notice::$NAME parameters updated" ;;
-              *)   echo "::notice::$NAME parameter update skipped - Status: $PARAM_STATUS" ;;
-            esac
+            if [ "$PARAM_STATUS" = "200" ] || [ "$PARAM_STATUS" = "202" ]; then
+              echo "::notice::$NAME parameters updated successfully"
+            else
+              echo "::warning::$NAME parameter update returned $PARAM_STATUS - Trying alternative method..."
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/parameters" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "updateDetails": [
+                    { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
+                    { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
+                  ]
+                }' | jq .
+            fi
 
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
@@ -450,6 +475,8 @@ jobs:
             fi
             echo "::notice::Processing: $NAME"
 
+            echo "::notice::Updating parameters for $NAME..."
+
             PARAM_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
               -H "Authorization: Bearer $TOKEN" \
@@ -461,10 +488,22 @@ jobs:
                 ]
               }')
 
-            case $PARAM_STATUS in
-              200) echo "::notice::$NAME parameters updated" ;;
-              *)   echo "::notice::$NAME parameter update skipped - Status: $PARAM_STATUS" ;;
-            esac
+            if [ "$PARAM_STATUS" = "200" ] || [ "$PARAM_STATUS" = "202" ]; then
+              echo "::notice::$NAME parameters updated successfully"
+            else
+              echo "::warning::$NAME parameter update returned $PARAM_STATUS - Trying alternative method..."
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/parameters" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "updateDetails": [
+                    { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
+                    { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
+                  ]
+                }' | jq .
+            fi
 
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
