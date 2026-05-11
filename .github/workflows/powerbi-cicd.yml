@@ -11,10 +11,13 @@ on:
 
 jobs:
 
-  # ====================== DEV ======================
+  # =========================================================
+  # DEV DEPLOYMENT
+  # =========================================================
 
   deploy-dev:
     runs-on: ubuntu-latest
+
     environment: dev
 
     if: github.ref == 'refs/heads/dev'
@@ -25,78 +28,104 @@ jobs:
       CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
-      - name: Get Token
+      - name: Get Access Token
         id: auth
         uses: ./.github/actions/get-token
 
-      - name: Deploy DEV Reports
+      - name: Deploy Reports To DEV
         run: |
+
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.DEV_WORKSPACE_ID }}"
+
           SERVER_NAME="${{ secrets.DEV_DB_SERVER }}"
           DATABASE_NAME="${{ secrets.DEV_DB_NAME }}"
 
+          echo "========================================"
+          echo "STARTING DEV DEPLOYMENT"
+          echo "========================================"
+
           for file in reports/*.pbix; do
 
-            NAME=$(basename "$file" .pbix)
+            if [ -f "$file" ]; then
 
-            echo "========================================"
-            echo "DEPLOYING DEV: $NAME"
-            echo "========================================"
+              NAME=$(basename "$file" .pbix)
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
-              -H "Authorization: Bearer $TOKEN" \
-              -F "file=@$file"
+              echo ""
+              echo "========================================"
+              echo "DEPLOYING DEV REPORT: $NAME"
+              echo "========================================"
 
-            echo "Waiting for dataset..."
-            sleep 40
+              RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+                -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
+                -H "Authorization: Bearer $TOKEN" \
+                -F "file=@$file")
 
-            DATASET_ID=$(curl -s \
-              -H "Authorization: Bearer $TOKEN" \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
-              jq -r --arg NAME "$NAME" \
-              '.value[] | select(.name==$NAME) | .id')
+              HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
 
-            echo "Dataset ID: $DATASET_ID"
+              if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "202" ]]; then
+                echo "::error::DEV deployment failed for $NAME"
+                exit 1
+              fi
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{
-                    \"updateDetails\": [
-                      {
-                        \"name\": \"ServerName\",
-                        \"newValue\": \"$SERVER_NAME\"
-                      },
-                      {
-                        \"name\": \"DatabaseName\",
-                        \"newValue\": \"$DATABASE_NAME\"
-                      }
-                    ]
-                  }"
+              echo "::notice::DEV deployment successful for $NAME"
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"notifyOption":"NoNotification"}'
+              echo "Waiting for dataset creation..."
+              sleep 40
 
-            echo "Refresh triggered for DEV: $NAME"
+              DATASET_ID=$(curl -s \
+                -H "Authorization: Bearer $TOKEN" \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
+                jq -r --arg NAME "$NAME" \
+                '.value[] | select(.name==$NAME) | .id')
+
+              echo "Dataset ID: $DATASET_ID"
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{
+                      \"updateDetails\": [
+                        {
+                          \"name\": \"ServerName\",
+                          \"newValue\": \"$SERVER_NAME\"
+                        },
+                        {
+                          \"name\": \"DatabaseName\",
+                          \"newValue\": \"$DATABASE_NAME\"
+                        }
+                      ]
+                    }"
+
+              echo "::notice::DEV parameters updated"
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"notifyOption":"NoNotification"}'
+
+              echo "::notice::DEV refresh triggered for $NAME"
+
+            fi
 
           done
 
 
-  # ====================== UAT ======================
+
+  # =========================================================
+  # UAT DEPLOYMENT
+  # =========================================================
 
   deploy-uat:
     runs-on: ubuntu-latest
-    environment: uat
 
-    needs: deploy-dev
+    environment: uat
 
     if: github.ref == 'refs/heads/main'
 
@@ -106,72 +135,103 @@ jobs:
       CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
-      - name: Get Token
+      - name: Get Access Token
         id: auth
         uses: ./.github/actions/get-token
 
-      - name: Deploy UAT Reports
+      - name: Deploy Reports To UAT
         run: |
+
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.UAT_WORKSPACE_ID }}"
+
           SERVER_NAME="${{ secrets.UAT_DB_SERVER }}"
           DATABASE_NAME="${{ secrets.UAT_DB_NAME }}"
 
+          echo "========================================"
+          echo "STARTING UAT DEPLOYMENT"
+          echo "========================================"
+
           for file in reports/*.pbix; do
 
-            NAME=$(basename "$file" .pbix)
+            if [ -f "$file" ]; then
 
-            echo "========================================"
-            echo "DEPLOYING UAT: $NAME"
-            echo "========================================"
+              NAME=$(basename "$file" .pbix)
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
-              -H "Authorization: Bearer $TOKEN" \
-              -F "file=@$file"
+              echo ""
+              echo "========================================"
+              echo "DEPLOYING UAT REPORT: $NAME"
+              echo "========================================"
 
-            sleep 40
+              RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+                -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
+                -H "Authorization: Bearer $TOKEN" \
+                -F "file=@$file")
 
-            DATASET_ID=$(curl -s \
-              -H "Authorization: Bearer $TOKEN" \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
-              jq -r --arg NAME "$NAME" \
-              '.value[] | select(.name==$NAME) | .id')
+              HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{
-                    \"updateDetails\": [
-                      {
-                        \"name\": \"ServerName\",
-                        \"newValue\": \"$SERVER_NAME\"
-                      },
-                      {
-                        \"name\": \"DatabaseName\",
-                        \"newValue\": \"$DATABASE_NAME\"
-                      }
-                    ]
-                  }"
+              if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "202" ]]; then
+                echo "::error::UAT deployment failed for $NAME"
+                exit 1
+              fi
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"notifyOption":"NoNotification"}'
+              echo "::notice::UAT deployment successful for $NAME"
 
-            echo "Refresh triggered for UAT: $NAME"
+              echo "Waiting for dataset creation..."
+              sleep 40
+
+              DATASET_ID=$(curl -s \
+                -H "Authorization: Bearer $TOKEN" \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
+                jq -r --arg NAME "$NAME" \
+                '.value[] | select(.name==$NAME) | .id')
+
+              echo "Dataset ID: $DATASET_ID"
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{
+                      \"updateDetails\": [
+                        {
+                          \"name\": \"ServerName\",
+                          \"newValue\": \"$SERVER_NAME\"
+                        },
+                        {
+                          \"name\": \"DatabaseName\",
+                          \"newValue\": \"$DATABASE_NAME\"
+                        }
+                      ]
+                    }"
+
+              echo "::notice::UAT parameters updated"
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"notifyOption":"NoNotification"}'
+
+              echo "::notice::UAT refresh triggered for $NAME"
+
+            fi
 
           done
 
 
-  # ====================== PRD ======================
+
+  # =========================================================
+  # PRD DEPLOYMENT
+  # =========================================================
 
   deploy-prd:
     runs-on: ubuntu-latest
+
     environment: prd
 
     needs: deploy-uat
@@ -184,64 +244,90 @@ jobs:
       CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
-      - name: Get Token
+      - name: Get Access Token
         id: auth
         uses: ./.github/actions/get-token
 
-      - name: Deploy PRD Reports
+      - name: Deploy Reports To PRD
         run: |
+
           TOKEN="${{ steps.auth.outputs.token }}"
           WORKSPACE_ID="${{ secrets.PRD_WORKSPACE_ID }}"
+
           SERVER_NAME="${{ secrets.PRD_DB_SERVER }}"
           DATABASE_NAME="${{ secrets.PRD_DB_NAME }}"
 
+          echo "========================================"
+          echo "STARTING PRD DEPLOYMENT"
+          echo "========================================"
+
           for file in reports/*.pbix; do
 
-            NAME=$(basename "$file" .pbix)
+            if [ -f "$file" ]; then
 
-            echo "========================================"
-            echo "DEPLOYING PRD: $NAME"
-            echo "========================================"
+              NAME=$(basename "$file" .pbix)
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
-              -H "Authorization: Bearer $TOKEN" \
-              -F "file=@$file"
+              echo ""
+              echo "========================================"
+              echo "DEPLOYING PRD REPORT: $NAME"
+              echo "========================================"
 
-            sleep 40
+              RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+                -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
+                -H "Authorization: Bearer $TOKEN" \
+                -F "file=@$file")
 
-            DATASET_ID=$(curl -s \
-              -H "Authorization: Bearer $TOKEN" \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
-              jq -r --arg NAME "$NAME" \
-              '.value[] | select(.name==$NAME) | .id')
+              HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{
-                    \"updateDetails\": [
-                      {
-                        \"name\": \"ServerName\",
-                        \"newValue\": \"$SERVER_NAME\"
-                      },
-                      {
-                        \"name\": \"DatabaseName\",
-                        \"newValue\": \"$DATABASE_NAME\"
-                      }
-                    ]
-                  }"
+              if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "202" ]]; then
+                echo "::error::PRD deployment failed for $NAME"
+                exit 1
+              fi
 
-            curl -s -X POST \
-              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"notifyOption":"NoNotification"}'
+              echo "::notice::PRD deployment successful for $NAME"
 
-            echo "Refresh triggered for PRD: $NAME"
+              echo "Waiting for dataset creation..."
+              sleep 40
+
+              DATASET_ID=$(curl -s \
+                -H "Authorization: Bearer $TOKEN" \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
+                jq -r --arg NAME "$NAME" \
+                '.value[] | select(.name==$NAME) | .id')
+
+              echo "Dataset ID: $DATASET_ID"
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.UpdateParameters" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{
+                      \"updateDetails\": [
+                        {
+                          \"name\": \"ServerName\",
+                          \"newValue\": \"$SERVER_NAME\"
+                        },
+                        {
+                          \"name\": \"DatabaseName\",
+                          \"newValue\": \"$DATABASE_NAME\"
+                        }
+                      ]
+                    }"
+
+              echo "::notice::PRD parameters updated"
+
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"notifyOption":"NoNotification"}'
+
+              echo "::notice::PRD refresh triggered for $NAME"
+
+            fi
 
           done
-
