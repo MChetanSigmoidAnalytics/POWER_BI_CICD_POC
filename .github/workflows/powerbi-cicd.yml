@@ -8,11 +8,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ─────────────────────────────
-  # JOB 1: DEPLOY TO DEV
-  # push to dev → auto deploy
-  # no approval needed
-  # ─────────────────────────────
   deploy-dev:
     runs-on: ubuntu-latest
     environment: dev
@@ -28,28 +23,23 @@ jobs:
         id: auth
         uses: ./.github/actions/get-token
 
-      - name: Verify DEV Workspace Access
+      - name: Verify Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}" \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
-
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
-
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::Cannot access DEV workspace - Status: $HTTP_STATUS"
+            echo "::error::Cannot access DEV workspace"
             exit 1
           fi
-
-          # only print workspace name not full response
-          WORKSPACE=$(echo $BODY | jq -r '.name')
-          echo "::notice::DEV Workspace verified: $WORKSPACE"
+          echo "::notice::Workspace verified: $(echo $BODY | jq -r '.name')"
 
       - name: Check PBIX File
         run: |
           if [ ! -f "reports/customer_sucess_report.pbix" ]; then
-            echo "::error::PBIX file not found at reports/customer_sucess_report.pbix"
+            echo "::error::PBIX file not found"
             exit 1
           fi
           echo "::notice::PBIX file verified"
@@ -60,25 +50,104 @@ jobs:
             -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/imports?datasetDisplayName=CustomerSuccessReport&nameConflict=CreateOrOverwrite" \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
             -F "file=@reports/customer_sucess_report.pbix")
-
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
-
           case $HTTP_STATUS in
-            200|202)
-              # only print import ID not full response
-              IMPORT_ID=$(echo $BODY | jq -r '.id')
-              echo "::notice::DEV deployment successful - Import ID: $IMPORT_ID"
-              ;;
-            *)
-              echo "::error::DEV deployment failed - Status: $HTTP_STATUS"
-              exit 1
-              ;;
+            200|202) echo "::notice::Deploy successful - Import ID: $(echo $BODY | jq -r '.id')" ;;
+            *) echo "::error::Deploy failed - Status: $HTTP_STATUS"; exit 1 ;;
           esac
 
-  # ─────────────────────────────
-  # JOB 2: DEPLOY TO UAT
-  # merge dev to main → approval gate
+      - name: Get Dataset ID
+        run: |
+          DATASET_ID=$(curl -s \
+            -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/datasets" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" | \
+            jq -r '.value[] | select(.name=="CustomerSuccessReport") | .id')
+          if [ -z "$DATASET_ID" ]; then
+            echo "::error::Dataset not found after import"
+            exit 1
+          fi
+          echo "::notice::Dataset ID found"
+          echo "DATASET_ID=$DATASET_ID" >> $GITHUB_ENV
+
+      - name: Update Dataset Parameters
+        run: |
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.UpdateParameters" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "updateDetails": [
+                { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
+                { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
+              ]
+            }')
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            200) echo "::notice::Parameters updated successfully" ;;
+            *) echo "::error::Parameter update failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
+      - name: Takeover Datasource
+        run: |
+          curl -s -X POST \
+            "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.TakeOver" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}"
+          echo "::notice::Datasource takeover complete"
+
+      - name: Lookup and Bind Connector       # ← fully automatic lookup by name
+        run: |
+          # Step 1 — lookup connector ID by name from Fabric API
+          CONNECTIONS=$(curl -s \
+            -X GET "https://api.fabric.microsoft.com/v1/connections" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          CONNECTION_ID=$(echo $CONNECTIONS | jq -r \
+            --arg name "${{ secrets.CONNECTOR_NAME }}" \
+            '.value[] | select(.displayName==$name) | .id')
+
+          if [ -z "$CONNECTION_ID" ]; then
+            echo "::error::Connector not found: ${{ secrets.CONNECTOR_NAME }}"
+            exit 1
+          fi
+          echo "::notice::Connector found: ${{ secrets.CONNECTOR_NAME }}"
+
+          # Step 2 — get gateway ID from dataset datasources
+          DATASOURCES=$(curl -s \
+            -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/datasets/$DATASET_ID/datasources" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          GATEWAY_ID=$(echo $DATASOURCES | jq -r '.value[0].gatewayId')
+
+          # Step 3 — bind dataset to connector
+          BIND_RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.BindToGateway" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"gatewayObjectId\": \"$GATEWAY_ID\",
+              \"datasourceObjectIds\": [\"$CONNECTION_ID\"]
+            }")
+
+          HTTP_STATUS=$(echo "$BIND_RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            200) echo "::notice::Connector bound successfully" ;;
+            *) echo "::error::Connector binding failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
+      - name: Trigger Dataset Refresh
+        run: |
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.DEV_WORKSPACE_ID }}/datasets/$DATASET_ID/refreshes" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"notifyOption": "NoNotification"}')
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            202) echo "::notice::Dataset refresh triggered successfully" ;;
+            *) echo "::error::Refresh failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
   # ─────────────────────────────
   deploy-uat:
     runs-on: ubuntu-latest
@@ -95,27 +164,23 @@ jobs:
         id: auth
         uses: ./.github/actions/get-token
 
-      - name: Verify UAT Workspace Access
+      - name: Verify Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}" \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
-
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
-
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::Cannot access UAT workspace - Status: $HTTP_STATUS"
+            echo "::error::Cannot access UAT workspace"
             exit 1
           fi
-
-          WORKSPACE=$(echo $BODY | jq -r '.name')
-          echo "::notice::UAT Workspace verified: $WORKSPACE"
+          echo "::notice::Workspace verified: $(echo $BODY | jq -r '.name')"
 
       - name: Check PBIX File
         run: |
           if [ ! -f "reports/customer_sucess_report.pbix" ]; then
-            echo "::error::PBIX file not found at reports/customer_sucess_report.pbix"
+            echo "::error::PBIX file not found"
             exit 1
           fi
           echo "::notice::PBIX file verified"
@@ -126,25 +191,101 @@ jobs:
             -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/imports?datasetDisplayName=CustomerSuccessReport&nameConflict=CreateOrOverwrite" \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
             -F "file=@reports/customer_sucess_report.pbix")
-
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
-
           case $HTTP_STATUS in
-            200|202)
-              IMPORT_ID=$(echo $BODY | jq -r '.id')
-              echo "::notice::UAT deployment successful - Import ID: $IMPORT_ID"
-              ;;
-            *)
-              echo "::error::UAT deployment failed - Status: $HTTP_STATUS"
-              exit 1
-              ;;
+            200|202) echo "::notice::Deploy successful - Import ID: $(echo $BODY | jq -r '.id')" ;;
+            *) echo "::error::Deploy failed - Status: $HTTP_STATUS"; exit 1 ;;
           esac
 
-  # ─────────────────────────────
-  # JOB 3: DEPLOY TO PRD
-  # only after UAT succeeds
-  # requires approval gate
+      - name: Get Dataset ID
+        run: |
+          DATASET_ID=$(curl -s \
+            -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/datasets" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" | \
+            jq -r '.value[] | select(.name=="CustomerSuccessReport") | .id')
+          if [ -z "$DATASET_ID" ]; then
+            echo "::error::Dataset not found after import"
+            exit 1
+          fi
+          echo "::notice::Dataset ID found"
+          echo "DATASET_ID=$DATASET_ID" >> $GITHUB_ENV
+
+      - name: Update Dataset Parameters
+        run: |
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.UpdateParameters" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "updateDetails": [
+                { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
+                { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
+              ]
+            }')
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            200) echo "::notice::Parameters updated successfully" ;;
+            *) echo "::error::Parameter update failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
+      - name: Takeover Datasource
+        run: |
+          curl -s -X POST \
+            "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.TakeOver" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}"
+          echo "::notice::Datasource takeover complete"
+
+      - name: Lookup and Bind Connector
+        run: |
+          CONNECTIONS=$(curl -s \
+            -X GET "https://api.fabric.microsoft.com/v1/connections" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          CONNECTION_ID=$(echo $CONNECTIONS | jq -r \
+            --arg name "${{ secrets.CONNECTOR_NAME }}" \
+            '.value[] | select(.displayName==$name) | .id')
+
+          if [ -z "$CONNECTION_ID" ]; then
+            echo "::error::Connector not found: ${{ secrets.CONNECTOR_NAME }}"
+            exit 1
+          fi
+          echo "::notice::Connector found: ${{ secrets.CONNECTOR_NAME }}"
+
+          DATASOURCES=$(curl -s \
+            -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/datasets/$DATASET_ID/datasources" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          GATEWAY_ID=$(echo $DATASOURCES | jq -r '.value[0].gatewayId')
+
+          BIND_RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.BindToGateway" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"gatewayObjectId\": \"$GATEWAY_ID\",
+              \"datasourceObjectIds\": [\"$CONNECTION_ID\"]
+            }")
+
+          HTTP_STATUS=$(echo "$BIND_RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            200) echo "::notice::Connector bound successfully" ;;
+            *) echo "::error::Connector binding failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
+      - name: Trigger Dataset Refresh
+        run: |
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.UAT_WORKSPACE_ID }}/datasets/$DATASET_ID/refreshes" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"notifyOption": "NoNotification"}')
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            202) echo "::notice::Dataset refresh triggered successfully" ;;
+            *) echo "::error::Refresh failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
   # ─────────────────────────────
   deploy-prd:
     runs-on: ubuntu-latest
@@ -162,27 +303,23 @@ jobs:
         id: auth
         uses: ./.github/actions/get-token
 
-      - name: Verify PRD Workspace Access
+      - name: Verify Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
             -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}" \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
-
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
-
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::Cannot access PRD workspace - Status: $HTTP_STATUS"
+            echo "::error::Cannot access PRD workspace"
             exit 1
           fi
-
-          WORKSPACE=$(echo $BODY | jq -r '.name')
-          echo "::notice::PRD Workspace verified: $WORKSPACE"
+          echo "::notice::Workspace verified: $(echo $BODY | jq -r '.name')"
 
       - name: Check PBIX File
         run: |
           if [ ! -f "reports/customer_sucess_report.pbix" ]; then
-            echo "::error::PBIX file not found at reports/customer_sucess_report.pbix"
+            echo "::error::PBIX file not found"
             exit 1
           fi
           echo "::notice::PBIX file verified"
@@ -193,17 +330,97 @@ jobs:
             -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/imports?datasetDisplayName=CustomerSuccessReport&nameConflict=CreateOrOverwrite" \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
             -F "file=@reports/customer_sucess_report.pbix")
-
           HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
           BODY=$(echo "$RESPONSE" | sed '/==HTTP_STATUS==/d')
-
           case $HTTP_STATUS in
-            200|202)
-              IMPORT_ID=$(echo $BODY | jq -r '.id')
-              echo "::notice::PRD deployment successful - Import ID: $IMPORT_ID"
-              ;;
-            *)
-              echo "::error::PRD deployment failed - Status: $HTTP_STATUS"
-              exit 1
-              ;;
+            200|202) echo "::notice::Deploy successful - Import ID: $(echo $BODY | jq -r '.id')" ;;
+            *) echo "::error::Deploy failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
+      - name: Get Dataset ID
+        run: |
+          DATASET_ID=$(curl -s \
+            -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/datasets" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" | \
+            jq -r '.value[] | select(.name=="CustomerSuccessReport") | .id')
+          if [ -z "$DATASET_ID" ]; then
+            echo "::error::Dataset not found after import"
+            exit 1
+          fi
+          echo "::notice::Dataset ID found"
+          echo "DATASET_ID=$DATASET_ID" >> $GITHUB_ENV
+
+      - name: Update Dataset Parameters
+        run: |
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.UpdateParameters" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "updateDetails": [
+                { "name": "ServerName",   "newValue": "${{ secrets.DB_SERVER }}" },
+                { "name": "DatabaseName", "newValue": "${{ secrets.DB_NAME }}" }
+              ]
+            }')
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            200) echo "::notice::Parameters updated successfully" ;;
+            *) echo "::error::Parameter update failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
+      - name: Takeover Datasource
+        run: |
+          curl -s -X POST \
+            "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.TakeOver" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}"
+          echo "::notice::Datasource takeover complete"
+
+      - name: Lookup and Bind Connector
+        run: |
+          CONNECTIONS=$(curl -s \
+            -X GET "https://api.fabric.microsoft.com/v1/connections" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          CONNECTION_ID=$(echo $CONNECTIONS | jq -r \
+            --arg name "${{ secrets.CONNECTOR_NAME }}" \
+            '.value[] | select(.displayName==$name) | .id')
+
+          if [ -z "$CONNECTION_ID" ]; then
+            echo "::error::Connector not found: ${{ secrets.CONNECTOR_NAME }}"
+            exit 1
+          fi
+          echo "::notice::Connector found: ${{ secrets.CONNECTOR_NAME }}"
+
+          DATASOURCES=$(curl -s \
+            -X GET "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/datasets/$DATASET_ID/datasources" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+
+          GATEWAY_ID=$(echo $DATASOURCES | jq -r '.value[0].gatewayId')
+
+          BIND_RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/datasets/$DATASET_ID/Default.BindToGateway" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"gatewayObjectId\": \"$GATEWAY_ID\",
+              \"datasourceObjectIds\": [\"$CONNECTION_ID\"]
+            }")
+
+          HTTP_STATUS=$(echo "$BIND_RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            200) echo "::notice::Connector bound successfully" ;;
+            *) echo "::error::Connector binding failed - Status: $HTTP_STATUS"; exit 1 ;;
+          esac
+
+      - name: Trigger Dataset Refresh
+        run: |
+          RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+            -X POST "https://api.powerbi.com/v1.0/myorg/groups/${{ secrets.PRD_WORKSPACE_ID }}/datasets/$DATASET_ID/refreshes" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"notifyOption": "NoNotification"}')
+          HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+          case $HTTP_STATUS in
+            202) echo "::notice::Dataset refresh triggered successfully" ;;
+            *) echo "::error::Refresh failed - Status: $HTTP_STATUS"; exit 1 ;;
           esac
