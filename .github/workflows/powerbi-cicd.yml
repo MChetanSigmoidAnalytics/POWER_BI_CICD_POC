@@ -27,6 +27,14 @@ jobs:
         id: auth
         uses: ./.github/actions/get-token
 
+      - name: 🔍 Debug - List All Connections & IDs
+        run: |
+          TOKEN="${{ steps.auth.outputs.token }}"
+          curl -s -H "Authorization: Bearer $TOKEN" \
+            "https://api.fabric.microsoft.com/v1/connections" | \
+            jq -r '.value[] | "Connection: \(.displayName) | ID: \(.id) | Type: \(.connectionType)"'
+          echo "::notice::Fabric connections listed."
+
       - name: Verify DEV Workspace Access
         run: |
           RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
@@ -172,6 +180,14 @@ jobs:
         id: auth
         uses: ./.github/actions/get-token
 
+      - name: 🔍 Debug - List All Connections & IDs
+        run: |
+          TOKEN="${{ steps.auth.outputs.token }}"
+          curl -s -H "Authorization: Bearer $TOKEN" \
+            "https://api.fabric.microsoft.com/v1/connections" | \
+            jq -r '.value[] | "Connection: \(.displayName) | ID: \(.id) | Type: \(.connectionType)"'
+          echo "::notice::Fabric connections listed."
+
       # (You can keep your existing Verify + Check PBIX + Deploy steps)
       # For brevity, I'm showing only the important updated part below.
       # Replace your old "Update Parameters & Bind Connector" with this:
@@ -257,6 +273,14 @@ jobs:
         id: auth
         uses: ./.github/actions/get-token
 
+      - name: 🔍 Debug - List All Connections & IDs
+        run: |
+          TOKEN="${{ steps.auth.outputs.token }}"
+          curl -s -H "Authorization: Bearer $TOKEN" \
+            "https://api.fabric.microsoft.com/v1/connections" | \
+            jq -r '.value[] | "Connection: \(.displayName) | ID: \(.id) | Type: \(.connectionType)"'
+          echo "::notice::Fabric connections listed."
+
       # ... (same Verify, Check Files, Deploy steps as above)
 
       - name: Update Parameters & Bind Connector
@@ -282,6 +306,8 @@ jobs:
             if [ -z "$DATASET_ID" ]; then echo "::error::Dataset not found: $NAME"; exit 1; fi
             
             echo "::notice::Processing: $NAME"
+            echo "::warning::Skipping parameter update (known issue after deployment)"
+            echo "::notice::Binding $NAME to cloud connector..."
             
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
