@@ -1,4 +1,4 @@
-
+```yaml
 deploy-dev:
   runs-on: ubuntu-latest
   environment: dev
@@ -163,4 +163,4 @@ deploy-dev:
           fi
 
         done
-
+```
