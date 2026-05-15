@@ -7,13 +7,7 @@ on:
       - main
   workflow_dispatch:
 
-env:
-  CLIENT_ID: ${{ secrets.CLIENT_ID }}
-  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-  TENANT_ID: ${{ secrets.TENANT_ID }}
-
 jobs:
-  # ====================== DEV ======================
   deploy-dev:
     runs-on: ubuntu-latest
     environment: dev
@@ -25,7 +19,8 @@ jobs:
     steps:
       - name: Checkout Code
         run: |
-          git clone --depth 1 "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
+          git clone --depth 1 --branch ${{ github.ref_name }} \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
 
       - name: Get Token
         id: auth
@@ -34,7 +29,7 @@ jobs:
       - name: Deploy All Reports to DEV
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🚀 Deploying all reports to DEV..."
+          echo "🚀 Deploying ALL .pbix files from reports/ folder..."
 
           for file in reports/*.pbix; do
             if [ -f "$file" ]; then
@@ -53,7 +48,7 @@ jobs:
               if [[ "$HTTP_STATUS" == 200 || "$HTTP_STATUS" == 202 ]]; then
                 echo "::notice::✅ $NAME deployed successfully"
               else
-                echo "::error::❌ $NAME deployment failed"
+                echo "::error::❌ $NAME deployment failed - Status: $HTTP_STATUS"
               fi
             fi
           done
@@ -76,152 +71,43 @@ jobs:
               return
             fi
 
-            echo "Waiting for dataset import to complete..."
-            for i in $(seq 1 12); do
-              IMPORT_STATE=$(curl -s -H "Authorization: Bearer $TOKEN" \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports" | \
-                jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .importState')
-              if [ -z "$IMPORT_STATE" ] || [ "$IMPORT_STATE" == "Succeeded" ] || [ "$IMPORT_STATE" == "Failed" ] || [ "$IMPORT_STATE" == "Cancelled" ]; then
-                break
-              fi
-              echo "Import state for $NAME: $IMPORT_STATE"
-              sleep 5
-            done
+            echo "Dataset ID: $DATASET_ID"
 
-            echo "Taking ownership of dataset $DATASET_ID..."
-            TAKEOVER_RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" -X POST \
+            # TakeOver (Fixed 411 Error)
+            echo "Taking ownership..."
+            curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
-              -H "Authorization: Bearer $TOKEN")
-            TAKEOVER_STATUS=$(echo "$TAKEOVER_RESPONSE" | tail -n1 | sed 's/==HTTP_STATUS==//')
-            if [ "$TAKEOVER_STATUS" != "200" ] && [ "$TAKEOVER_STATUS" != "202" ] && [ "$TAKEOVER_STATUS" != "204" ]; then
-              echo "::error::TakeOver failed for $NAME (status $TAKEOVER_STATUS):"
-              echo "$TAKEOVER_RESPONSE"
-              return
-            fi
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Length: 0"
 
+            # Bind to SPN Connection
             if [ -n "$CONNECTION_ID" ]; then
               echo "Binding to SPN Connection..."
-              BIND_RESPONSE=$(curl -s -X POST \
+              curl -s -X POST \
                 "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Content-Type: application/json" \
                 -d '{
                   "gatewayObjectId": "00000000-0000-0000-0000-000000000000",
-                  "datasourceObjectIds": ["'"$CONNECTION_ID"'" ]
-                }')
-
-              if echo "$BIND_RESPONSE" | grep -q 'error'; then
-                echo "::error::BindToGateway failed for $NAME: $BIND_RESPONSE"
-                if echo "$BIND_RESPONSE" | grep -q 'dataset owner'; then
-                  echo "::error::The caller is not recognized as the dataset owner. Ensure the service principal has dataset ownership and admin access in the workspace."
-                fi
-                return
-              fi
+                  "datasourceObjectIds": ["'"$CONNECTION_ID"'"]
+                }'
             fi
 
+            # Refresh
             echo "Triggering refresh..."
-            REFRESH_RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" -X POST \
+            curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{"notifyOption": "NoNotification"}')
-            REFRESH_STATUS=$(echo "$REFRESH_RESPONSE" | tail -n1 | sed 's/==HTTP_STATUS==//')
-            if [ "$REFRESH_STATUS" != "200" ] && [ "$REFRESH_STATUS" != "202" ]; then
-              echo "::error::Refresh failed for $NAME (status $REFRESH_STATUS):"
-              echo "$REFRESH_RESPONSE"
-              return
-            fi
+              -d '{"notifyOption": "NoNotification"}'
 
             echo "::notice::✅ $NAME processed successfully"
           }
 
+          # Process all reports
           for file in reports/*.pbix; do
             if [ -f "$file" ]; then
               NAME=$(basename "$file" .pbix)
               process_report "$NAME"
             fi
           done
-
-  
-
-  # ====================== UAT ======================
-  deploy-uat:
-    runs-on: ubuntu-latest
-    environment: uat
-    if: github.ref == 'refs/heads/main'
-    env:
-      WORKSPACE_ID:  ${{ secrets.UAT_WORKSPACE_ID }}
-      CONNECTION_ID: ${{ secrets.UAT_CONNECTION_ID }}
-
-    steps:
-      - name: Checkout Code
-        run: |
-          git clone --depth 1 "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
-
-      - name: Get Token
-        id: auth
-        uses: ./.github/actions/get-token
-
-      - name: Deploy All Reports to UAT
-        run: |
-          TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🚀 Deploying all reports to UAT..."
-          # Same deployment loop as DEV (copy-paste for simplicity)
-          for file in reports/*.pbix; do
-            if [ -f "$file" ]; then
-              NAME=$(basename "$file" .pbix)
-              echo "Deploying: $NAME to UAT"
-              curl -s -w "\n==HTTP_STATUS==%{http_code}" \
-                -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
-                -H "Authorization: Bearer $TOKEN" \
-                -F "file=@$file" | grep -E "(HTTP_STATUS|notice|error)"
-            fi
-          done
-
-      - name: TakeOver + Bind + Refresh (UAT)
-        run: |
-          TOKEN="${{ steps.auth.outputs.token }}"
-          CONNECTION_ID="${{ secrets.UAT_CONNECTION_ID }}"
-          # Same process_report function as DEV (you can copy it)
-          # ... (I'll keep it short, copy from DEV if needed)
-
-  # ====================== PRD ======================
-  deploy-prd:
-    runs-on: ubuntu-latest
-    environment: prd
-    needs: deploy-uat
-    if: github.ref == 'refs/heads/main'
-    env:
-      WORKSPACE_ID:  ${{ secrets.PRD_WORKSPACE_ID }}
-      CONNECTION_ID: ${{ secrets.PRD_CONNECTION_ID }}
-
-    steps:
-      - name: Checkout Code
-        run: |
-          git clone --depth 1 "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
-
-      - name: Get Token
-        id: auth
-        uses: ./.github/actions/get-token
-
-      - name: Deploy All Reports to PRD
-        run: |
-          TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🚀 Deploying all reports to PRD..."
-          for file in reports/*.pbix; do
-            if [ -f "$file" ]; then
-              NAME=$(basename "$file" .pbix)
-              echo "Deploying: $NAME to PRD"
-              curl -s -w "\n==HTTP_STATUS==%{http_code}" \
-                -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
-                -H "Authorization: Bearer $TOKEN" \
-                -F "file=@$file" | grep -E "(HTTP_STATUS|notice|error)"
-            fi
-          done
-
-      - name: TakeOver + Bind + Refresh (PRD)
-        run: |
-          TOKEN="${{ steps.auth.outputs.token }}"
-          CONNECTION_ID="${{ secrets.PRD_CONNECTION_ID }}"
-          # Same process_report logic as DEV
-          echo "PRD processing logic..."
