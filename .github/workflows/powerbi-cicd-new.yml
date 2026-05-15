@@ -45,7 +45,9 @@ jobs:
       CONNECTION_ID: ${{ secrets.DEV_CONNECTION_ID }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        run: |
+          git clone --depth 1 "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
 
       - name: Get Token
         id: auth
