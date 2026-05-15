@@ -17,13 +17,16 @@ runs:
       id: fetch-token
       shell: bash
       run: |
-        TOKEN=$(curl -s -X POST \
+        RESPONSE=$(curl -s -X POST \
           https://login.microsoftonline.com/${{ env.TENANT_ID }}/oauth2/v2.0/token \
           -H "Content-Type: application/x-www-form-urlencoded" \
-          -d "client_id=${{ env.CLIENT_ID }}&client_secret=${{ env.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default" | jq -r '.access_token')
+          -d "client_id=${{ env.CLIENT_ID }}&client_secret=${{ env.CLIENT_SECRET }}&grant_type=client_credentials&scope=https://analysis.windows.net/powerbi/api/.default")
+
+        TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
 
         if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
           echo "::error::Token fetch failed - check CLIENT_ID, CLIENT_SECRET, TENANT_ID"
+          echo "::error::Response: $RESPONSE"
           exit 1
         fi
 

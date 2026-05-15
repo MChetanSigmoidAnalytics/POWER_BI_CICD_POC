@@ -7,6 +7,11 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  CLIENT_ID: ${{ secrets.CLIENT_ID }}
+  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+  TENANT_ID: ${{ secrets.TENANT_ID }}
+
 jobs:
   # ====================== DEV ======================
   deploy-dev:
