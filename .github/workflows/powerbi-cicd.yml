@@ -105,6 +105,13 @@ jobs:
             echo "::notice::✅ $NAME processed successfully"
           }
 
+          for file in reports/*.pbix; do
+            if [ -f "$file" ]; then
+              NAME=$(basename "$file" .pbix)
+              process_report "$NAME"
+            fi
+          done
+
   
 
   # ====================== UAT ======================
