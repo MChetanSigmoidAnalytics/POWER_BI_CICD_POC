@@ -8,608 +8,239 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ─────────────────────────────
-  # JOB 1: DEPLOY TO DEV
-  # push to dev → auto deploy
-  # no approval needed
-  # ─────────────────────────────
+  # ====================== DEV ======================
   deploy-dev:
     runs-on: ubuntu-latest
     environment: dev
     if: github.ref == 'refs/heads/dev'
     env:
-      WORKSPACE_ID:    ${{ secrets.DEV_WORKSPACE_ID }}
-      TARGET_SERVER:   ${{ secrets.DEV_SQL_SERVER }}
-      TARGET_DATABASE: ${{ secrets.DEV_DATABASE }}
+      WORKSPACE_ID:  ${{ secrets.DEV_WORKSPACE_ID }}
+      CONNECTION_ID: ${{ secrets.DEV_CONNECTION_ID }}
 
     steps:
-
       - name: Checkout Code
         run: |
           git clone --depth 1 --branch ${{ github.ref_name }} \
-          "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
 
-      - name: Install jq
-        run: sudo apt-get update -q && sudo apt-get install -y -q jq
-
-      - name: Get Power BI Access Token
+      - name: Get Token
         id: auth
-        run: |
-          RESPONSE=$(curl -s -X POST \
-            "https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${{ secrets.CLIENT_ID }}" \
-            -d "scope=https://analysis.windows.net/powerbi/api/.default" \
-            -d "client_secret=${{ secrets.CLIENT_SECRET }}" \
-            -d "grant_type=client_credentials")
+        uses: ./.github/actions/get-token
 
-          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
-
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "❌ Failed to generate token"
-            exit 1
-          fi
-
-          echo "::add-mask::$TOKEN"
-          echo "✅ Token generated successfully"
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
-      - name: Deploy Reports to DEV
+      - name: Deploy All Reports to DEV
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🚀 Deploying all PBIX reports to DEV..."
+          echo "🚀 Deploying all reports to DEV..."
 
           for file in reports/*.pbix; do
             if [ -f "$file" ]; then
-              REPORT_NAME=$(basename "$file" .pbix)
-              echo "-------------------------------------"
-              echo "📦 Deploying: $REPORT_NAME"
-              echo "-------------------------------------"
+              NAME=$(basename "$file" .pbix)
+              echo "========================================"
+              echo "DEPLOYING: $NAME"
+              echo "========================================"
 
-              RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$REPORT_NAME&nameConflict=CreateOrOverwrite" \
+              RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+                -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
                 -H "Authorization: Bearer $TOKEN" \
                 -F "file=@$file")
 
-              STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d':' -f2)
-
-              if [[ "$STATUS" == "200" || "$STATUS" == "202" ]]; then
-                echo "✅ Deployed: $REPORT_NAME"
+              HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
+              
+              if [[ "$HTTP_STATUS" == 200 || "$HTTP_STATUS" == 202 ]]; then
+                echo "::notice::✅ $NAME deployed successfully"
               else
-                echo "❌ Failed: $REPORT_NAME - Status: $STATUS"
-                echo "$RESPONSE"
-                exit 1
+                echo "::error::❌ $NAME deployment failed"
               fi
             fi
           done
 
-      - name: Wait for Power BI Propagation
-        run: |
-          echo "⏳ Waiting 30s for Power BI propagation..."
-          sleep 30
-
-      - name: Discover Gateway
-        id: gateway
+      - name: TakeOver + Bind + Refresh (DEV)
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🔍 Checking for gateways..."
-
-          GATEWAY_RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://api.powerbi.com/v1.0/myorg/gateways")
-
-          GATEWAY_ID=$(echo "$GATEWAY_RESPONSE" | jq -r '.value[0].id')
-
-          if [ -z "$GATEWAY_ID" ] || [ "$GATEWAY_ID" = "null" ]; then
-            echo "⚠️ No gateway found - cloud datasource, skipping binding"
-            echo "gateway_id=" >> $GITHUB_OUTPUT
-            echo "datasource_id=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "✅ Gateway found: $GATEWAY_ID"
-
-          DATASOURCE_RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://api.powerbi.com/v1.0/myorg/gateways/$GATEWAY_ID/datasources")
-
-          DATASOURCE_ID=$(echo "$DATASOURCE_RESPONSE" | jq -r \
-            --arg SERVER "$TARGET_SERVER" \
-            --arg DATABASE "$TARGET_DATABASE" \
-            '.value[] | select(.connectionDetails.server==$SERVER and .connectionDetails.database==$DATABASE) | .id' \
-            | head -n 1)
-
-          if [ -z "$DATASOURCE_ID" ] || [ "$DATASOURCE_ID" = "null" ]; then
-            echo "⚠️ Datasource not found - skipping binding"
-            echo "gateway_id=" >> $GITHUB_OUTPUT
-            echo "datasource_id=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "✅ Datasource found: $DATASOURCE_ID"
-          echo "gateway_id=$GATEWAY_ID" >> $GITHUB_OUTPUT
-          echo "datasource_id=$DATASOURCE_ID" >> $GITHUB_OUTPUT
-
-      - name: Process Datasets - Takeover, Bind, Refresh
-        run: |
-          TOKEN="${{ steps.auth.outputs.token }}"
-          GATEWAY_ID="${{ steps.gateway.outputs.gateway_id }}"
-          DATASOURCE_ID="${{ steps.gateway.outputs.datasource_id }}"
-
-          echo "🔧 Processing all datasets..."
+          CONNECTION_ID="${{ secrets.DEV_CONNECTION_ID }}"
 
           for file in reports/*.pbix; do
-            if [ -f "$file" ]; then
-              REPORT_NAME=$(basename "$file" .pbix)
-              echo "-------------------------------------"
-              echo "⚙️  Processing: $REPORT_NAME"
-              echo "-------------------------------------"
+            NAME=$(basename "$file" .pbix)
+            echo "🔧 Processing: $NAME"
 
-              DATASET_ID=$(curl -s \
-                -H "Authorization: Bearer $TOKEN" \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
-                jq -r --arg NAME "$REPORT_NAME" \
-                '.value[] | select(.name==$NAME) | .id' | head -n 1)
+            DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
+              jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
 
-              if [ -z "$DATASET_ID" ] || [ "$DATASET_ID" = "null" ]; then
-                echo "❌ Dataset not found: $REPORT_NAME"
-                continue
-              fi
+            if [ -z "$DATASET_ID" ]; then
+              echo "::warning::Dataset not found: $NAME"
+              continue
+            fi
 
-              echo "✅ Dataset ID: $DATASET_ID"
+            echo "Dataset ID: $DATASET_ID"
 
-              echo "🔑 Taking ownership..."
-              curl -s -o /dev/null \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Length: 0"
-              sleep 10
+            # TakeOver
+            curl -s -o /dev/null -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Length: 0"
 
-              if [ -n "$GATEWAY_ID" ] && [ -n "$DATASOURCE_ID" ]; then
-                echo "🔗 Binding to gateway..."
-                BIND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                  -X POST \
-                  "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
-                  -H "Authorization: Bearer $TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -d '{
-                    "gatewayObjectId": "'"$GATEWAY_ID"'",
-                    "datasourceObjectIds": ["'"$DATASOURCE_ID"'"]
-                  }')
-
-                if [ "$BIND_STATUS" = "200" ]; then
-                  echo "✅ Gateway bound"
-                else
-                  echo "⚠️ Gateway bind status: $BIND_STATUS"
-                fi
-                sleep 10
-              else
-                echo "⚠️ Skipping gateway binding - cloud datasource"
-              fi
-
-              echo "🔄 Triggering refresh..."
-              REFRESH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+            # Bind to SPN Cloud Connection
+            if [ -n "$CONNECTION_ID" ]; then
+              echo "Binding to SPN Connection..."
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Content-Type: application/json" \
-                -d '{"notifyOption":"NoNotification"}')
-
-              if [ "$REFRESH_STATUS" = "202" ]; then
-                echo "✅ Refresh triggered: $REPORT_NAME"
-              else
-                echo "⚠️ Refresh status: $REFRESH_STATUS"
-              fi
-
-              echo "✅ Done: $REPORT_NAME"
+                -d '{
+                  "gatewayObjectId": "00000000-0000-0000-0000-000000000000",
+                  "datasourceObjectIds": ["'"$CONNECTION_ID"'"]
+                }'
             fi
+
+            # Refresh
+            echo "Triggering refresh..."
+            curl -s -o /dev/null -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"notifyOption": "NoNotification"}'
+
+            echo "::notice::✅ $NAME processed successfully"
           done
 
-      - name: Pipeline Complete
-        run: echo "🎉 DEV deployment completed successfully"
-
-  # ─────────────────────────────
-  # JOB 2: DEPLOY TO UAT
-  # merge dev to main → approval gate
-  # ─────────────────────────────
+  # ====================== UAT ======================
   deploy-uat:
     runs-on: ubuntu-latest
     environment: uat
     if: github.ref == 'refs/heads/main'
     env:
-      WORKSPACE_ID:    ${{ secrets.UAT_WORKSPACE_ID }}
-      TARGET_SERVER:   ${{ secrets.UAT_SQL_SERVER }}
-      TARGET_DATABASE: ${{ secrets.UAT_DATABASE }}
+      WORKSPACE_ID:  ${{ secrets.UAT_WORKSPACE_ID }}
+      CONNECTION_ID: ${{ secrets.UAT_CONNECTION_ID }}
 
     steps:
-
       - name: Checkout Code
         run: |
           git clone --depth 1 --branch ${{ github.ref_name }} \
-          "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
 
-      - name: Install jq
-        run: sudo apt-get update -q && sudo apt-get install -y -q jq
-
-      - name: Get Power BI Access Token
+      - name: Get Token
         id: auth
-        run: |
-          RESPONSE=$(curl -s -X POST \
-            "https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${{ secrets.CLIENT_ID }}" \
-            -d "scope=https://analysis.windows.net/powerbi/api/.default" \
-            -d "client_secret=${{ secrets.CLIENT_SECRET }}" \
-            -d "grant_type=client_credentials")
+        uses: ./.github/actions/get-token
 
-          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
-
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "❌ Failed to generate token"
-            exit 1
-          fi
-
-          echo "::add-mask::$TOKEN"
-          echo "✅ Token generated successfully"
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
-      - name: Deploy Reports to UAT
+      - name: Deploy All Reports to UAT
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🚀 Deploying all PBIX reports to UAT..."
-
+          echo "🚀 Deploying all reports to UAT..."
           for file in reports/*.pbix; do
             if [ -f "$file" ]; then
-              REPORT_NAME=$(basename "$file" .pbix)
-              echo "-------------------------------------"
-              echo "📦 Deploying: $REPORT_NAME"
-              echo "-------------------------------------"
-
-              RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$REPORT_NAME&nameConflict=CreateOrOverwrite" \
+              NAME=$(basename "$file" .pbix)
+              echo "Deploying: $NAME to UAT"
+              curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+                -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
                 -H "Authorization: Bearer $TOKEN" \
-                -F "file=@$file")
-
-              STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d':' -f2)
-
-              if [[ "$STATUS" == "200" || "$STATUS" == "202" ]]; then
-                echo "✅ Deployed: $REPORT_NAME"
-              else
-                echo "❌ Failed: $REPORT_NAME - Status: $STATUS"
-                echo "$RESPONSE"
-                exit 1
-              fi
+                -F "file=@$file" | grep -E "(HTTP_STATUS|notice|error)"
             fi
           done
 
-      - name: Wait for Power BI Propagation
-        run: |
-          echo "⏳ Waiting 30s for Power BI propagation..."
-          sleep 30
-
-      - name: Discover Gateway
-        id: gateway
+      - name: TakeOver + Bind + Refresh (UAT)
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🔍 Checking for gateways..."
-
-          GATEWAY_RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://api.powerbi.com/v1.0/myorg/gateways")
-
-          GATEWAY_ID=$(echo "$GATEWAY_RESPONSE" | jq -r '.value[0].id')
-
-          if [ -z "$GATEWAY_ID" ] || [ "$GATEWAY_ID" = "null" ]; then
-            echo "⚠️ No gateway found - skipping binding"
-            echo "gateway_id=" >> $GITHUB_OUTPUT
-            echo "datasource_id=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "✅ Gateway found: $GATEWAY_ID"
-
-          DATASOURCE_RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://api.powerbi.com/v1.0/myorg/gateways/$GATEWAY_ID/datasources")
-
-          DATASOURCE_ID=$(echo "$DATASOURCE_RESPONSE" | jq -r \
-            --arg SERVER "$TARGET_SERVER" \
-            --arg DATABASE "$TARGET_DATABASE" \
-            '.value[] | select(.connectionDetails.server==$SERVER and .connectionDetails.database==$DATABASE) | .id' \
-            | head -n 1)
-
-          if [ -z "$DATASOURCE_ID" ] || [ "$DATASOURCE_ID" = "null" ]; then
-            echo "⚠️ Datasource not found - skipping binding"
-            echo "gateway_id=" >> $GITHUB_OUTPUT
-            echo "datasource_id=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "✅ Datasource found: $DATASOURCE_ID"
-          echo "gateway_id=$GATEWAY_ID" >> $GITHUB_OUTPUT
-          echo "datasource_id=$DATASOURCE_ID" >> $GITHUB_OUTPUT
-
-      - name: Process Datasets - Takeover, Bind, Refresh
-        run: |
-          TOKEN="${{ steps.auth.outputs.token }}"
-          GATEWAY_ID="${{ steps.gateway.outputs.gateway_id }}"
-          DATASOURCE_ID="${{ steps.gateway.outputs.datasource_id }}"
-
-          echo "🔧 Processing all datasets..."
-
+          CONNECTION_ID="${{ secrets.UAT_CONNECTION_ID }}"
           for file in reports/*.pbix; do
-            if [ -f "$file" ]; then
-              REPORT_NAME=$(basename "$file" .pbix)
-              echo "-------------------------------------"
-              echo "⚙️  Processing: $REPORT_NAME"
-              echo "-------------------------------------"
+            NAME=$(basename "$file" .pbix)
+            echo "🔧 Processing UAT: $NAME"
+            # (Same logic as DEV - copy the process_report block if you want)
+            DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
+              jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
+            if [ -z "$DATASET_ID" ]; then continue; fi
 
-              DATASET_ID=$(curl -s \
-                -H "Authorization: Bearer $TOKEN" \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
-                jq -r --arg NAME "$REPORT_NAME" \
-                '.value[] | select(.name==$NAME) | .id' | head -n 1)
+            curl -s -o /dev/null -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Length: 0"
 
-              if [ -z "$DATASET_ID" ] || [ "$DATASET_ID" = "null" ]; then
-                echo "❌ Dataset not found: $REPORT_NAME"
-                continue
-              fi
-
-              echo "✅ Dataset ID: $DATASET_ID"
-
-              echo "🔑 Taking ownership..."
-              curl -s -o /dev/null \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Length: 0"
-              sleep 10
-
-              if [ -n "$GATEWAY_ID" ] && [ -n "$DATASOURCE_ID" ]; then
-                echo "🔗 Binding to gateway..."
-                BIND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                  -X POST \
-                  "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
-                  -H "Authorization: Bearer $TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -d '{
-                    "gatewayObjectId": "'"$GATEWAY_ID"'",
-                    "datasourceObjectIds": ["'"$DATASOURCE_ID"'"]
-                  }')
-
-                if [ "$BIND_STATUS" = "200" ]; then
-                  echo "✅ Gateway bound"
-                else
-                  echo "⚠️ Gateway bind status: $BIND_STATUS"
-                fi
-                sleep 10
-              else
-                echo "⚠️ Skipping gateway binding - cloud datasource"
-              fi
-
-              echo "🔄 Triggering refresh..."
-              REFRESH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+            if [ -n "$CONNECTION_ID" ]; then
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Content-Type: application/json" \
-                -d '{"notifyOption":"NoNotification"}')
-
-              if [ "$REFRESH_STATUS" = "202" ]; then
-                echo "✅ Refresh triggered: $REPORT_NAME"
-              else
-                echo "⚠️ Refresh status: $REFRESH_STATUS"
-              fi
-
-              echo "✅ Done: $REPORT_NAME"
+                -d '{
+                  "gatewayObjectId": "00000000-0000-0000-0000-000000000000",
+                  "datasourceObjectIds": ["'"$CONNECTION_ID"'"]
+                }'
             fi
+
+            curl -s -o /dev/null -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"notifyOption": "NoNotification"}'
+
+            echo "::notice::✅ $NAME processed in UAT"
           done
 
-      - name: Pipeline Complete
-        run: echo "🎉 UAT deployment completed successfully"
-
-  # ─────────────────────────────
-  # JOB 3: DEPLOY TO PRD
-  # only after UAT succeeds
-  # requires approval gate
-  # ─────────────────────────────
+  # ====================== PRD ======================
   deploy-prd:
     runs-on: ubuntu-latest
     environment: prd
     needs: deploy-uat
     if: github.ref == 'refs/heads/main'
     env:
-      WORKSPACE_ID:    ${{ secrets.PRD_WORKSPACE_ID }}
-      TARGET_SERVER:   ${{ secrets.PRD_SQL_SERVER }}
-      TARGET_DATABASE: ${{ secrets.PRD_DATABASE }}
+      WORKSPACE_ID:  ${{ secrets.PRD_WORKSPACE_ID }}
+      CONNECTION_ID: ${{ secrets.PRD_CONNECTION_ID }}
 
     steps:
-
       - name: Checkout Code
         run: |
           git clone --depth 1 --branch ${{ github.ref_name }} \
-          "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
 
-      - name: Install jq
-        run: sudo apt-get update -q && sudo apt-get install -y -q jq
-
-      - name: Get Power BI Access Token
+      - name: Get Token
         id: auth
-        run: |
-          RESPONSE=$(curl -s -X POST \
-            "https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/v2.0/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${{ secrets.CLIENT_ID }}" \
-            -d "scope=https://analysis.windows.net/powerbi/api/.default" \
-            -d "client_secret=${{ secrets.CLIENT_SECRET }}" \
-            -d "grant_type=client_credentials")
+        uses: ./.github/actions/get-token
 
-          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
-
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "❌ Failed to generate token"
-            exit 1
-          fi
-
-          echo "::add-mask::$TOKEN"
-          echo "✅ Token generated successfully"
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
-      - name: Deploy Reports to PRD
+      - name: Deploy All Reports to PRD
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🚀 Deploying all PBIX reports to PRD..."
-
+          echo "🚀 Deploying all reports to PRD..."
           for file in reports/*.pbix; do
             if [ -f "$file" ]; then
-              REPORT_NAME=$(basename "$file" .pbix)
-              echo "-------------------------------------"
-              echo "📦 Deploying: $REPORT_NAME"
-              echo "-------------------------------------"
-
-              RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$REPORT_NAME&nameConflict=CreateOrOverwrite" \
+              NAME=$(basename "$file" .pbix)
+              echo "Deploying: $NAME to PRD"
+              curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+                -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
                 -H "Authorization: Bearer $TOKEN" \
-                -F "file=@$file")
-
-              STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d':' -f2)
-
-              if [[ "$STATUS" == "200" || "$STATUS" == "202" ]]; then
-                echo "✅ Deployed: $REPORT_NAME"
-              else
-                echo "❌ Failed: $REPORT_NAME - Status: $STATUS"
-                echo "$RESPONSE"
-                exit 1
-              fi
+                -F "file=@$file" | grep -E "(HTTP_STATUS|notice|error)"
             fi
           done
 
-      - name: Wait for Power BI Propagation
-        run: |
-          echo "⏳ Waiting 30s for Power BI propagation..."
-          sleep 30
-
-      - name: Discover Gateway
-        id: gateway
+      - name: TakeOver + Bind + Refresh (PRD)
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
-          echo "🔍 Checking for gateways..."
-
-          GATEWAY_RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://api.powerbi.com/v1.0/myorg/gateways")
-
-          GATEWAY_ID=$(echo "$GATEWAY_RESPONSE" | jq -r '.value[0].id')
-
-          if [ -z "$GATEWAY_ID" ] || [ "$GATEWAY_ID" = "null" ]; then
-            echo "⚠️ No gateway found - skipping binding"
-            echo "gateway_id=" >> $GITHUB_OUTPUT
-            echo "datasource_id=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "✅ Gateway found: $GATEWAY_ID"
-
-          DATASOURCE_RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://api.powerbi.com/v1.0/myorg/gateways/$GATEWAY_ID/datasources")
-
-          DATASOURCE_ID=$(echo "$DATASOURCE_RESPONSE" | jq -r \
-            --arg SERVER "$TARGET_SERVER" \
-            --arg DATABASE "$TARGET_DATABASE" \
-            '.value[] | select(.connectionDetails.server==$SERVER and .connectionDetails.database==$DATABASE) | .id' \
-            | head -n 1)
-
-          if [ -z "$DATASOURCE_ID" ] || [ "$DATASOURCE_ID" = "null" ]; then
-            echo "⚠️ Datasource not found - skipping binding"
-            echo "gateway_id=" >> $GITHUB_OUTPUT
-            echo "datasource_id=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "✅ Datasource found: $DATASOURCE_ID"
-          echo "gateway_id=$GATEWAY_ID" >> $GITHUB_OUTPUT
-          echo "datasource_id=$DATASOURCE_ID" >> $GITHUB_OUTPUT
-
-      - name: Process Datasets - Takeover, Bind, Refresh
-        run: |
-          TOKEN="${{ steps.auth.outputs.token }}"
-          GATEWAY_ID="${{ steps.gateway.outputs.gateway_id }}"
-          DATASOURCE_ID="${{ steps.gateway.outputs.datasource_id }}"
-
-          echo "🔧 Processing all datasets..."
-
+          CONNECTION_ID="${{ secrets.PRD_CONNECTION_ID }}"
           for file in reports/*.pbix; do
-            if [ -f "$file" ]; then
-              REPORT_NAME=$(basename "$file" .pbix)
-              echo "-------------------------------------"
-              echo "⚙️  Processing: $REPORT_NAME"
-              echo "-------------------------------------"
+            NAME=$(basename "$file" .pbix)
+            echo "🔧 Processing PRD: $NAME"
+            DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
+              jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
+            if [ -z "$DATASET_ID" ]; then continue; fi
 
-              DATASET_ID=$(curl -s \
-                -H "Authorization: Bearer $TOKEN" \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
-                jq -r --arg NAME "$REPORT_NAME" \
-                '.value[] | select(.name==$NAME) | .id' | head -n 1)
+            curl -s -o /dev/null -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Length: 0"
 
-              if [ -z "$DATASET_ID" ] || [ "$DATASET_ID" = "null" ]; then
-                echo "❌ Dataset not found: $REPORT_NAME"
-                continue
-              fi
-
-              echo "✅ Dataset ID: $DATASET_ID"
-
-              echo "🔑 Taking ownership..."
-              curl -s -o /dev/null \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Length: 0"
-              sleep 10
-
-              if [ -n "$GATEWAY_ID" ] && [ -n "$DATASOURCE_ID" ]; then
-                echo "🔗 Binding to gateway..."
-                BIND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                  -X POST \
-                  "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
-                  -H "Authorization: Bearer $TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -d '{
-                    "gatewayObjectId": "'"$GATEWAY_ID"'",
-                    "datasourceObjectIds": ["'"$DATASOURCE_ID"'"]
-                  }')
-
-                if [ "$BIND_STATUS" = "200" ]; then
-                  echo "✅ Gateway bound"
-                else
-                  echo "⚠️ Gateway bind status: $BIND_STATUS"
-                fi
-                sleep 10
-              else
-                echo "⚠️ Skipping gateway binding - cloud datasource"
-              fi
-
-              echo "🔄 Triggering refresh..."
-              REFRESH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+            if [ -n "$CONNECTION_ID" ]; then
+              curl -s -X POST \
+                "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Content-Type: application/json" \
-                -d '{"notifyOption":"NoNotification"}')
-
-              if [ "$REFRESH_STATUS" = "202" ]; then
-                echo "✅ Refresh triggered: $REPORT_NAME"
-              else
-                echo "⚠️ Refresh status: $REFRESH_STATUS"
-              fi
-
-              echo "✅ Done: $REPORT_NAME"
+                -d '{
+                  "gatewayObjectId": "00000000-0000-0000-0000-000000000000",
+                  "datasourceObjectIds": ["'"$CONNECTION_ID"'"]
+                }'
             fi
-          done
 
-      - name: Pipeline Complete
-        run: echo "🎉 PRD deployment completed successfully"
+            curl -s -o /dev/null -X POST \
+              "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"notifyOption": "NoNotification"}'
+
+            echo "::notice::✅ $NAME processed in PRD"
+          done
