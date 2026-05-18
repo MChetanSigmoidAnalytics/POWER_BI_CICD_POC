@@ -7,10 +7,11 @@ on:
       - main
   workflow_dispatch:
 
+# Global Environment Variables
 env:
-  CLIENT_ID: ${{ secrets.CLIENT_ID }}
+  CLIENT_ID:     ${{ secrets.CLIENT_ID }}
   CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-  TENANT_ID: ${{ secrets.TENANT_ID }}
+  TENANT_ID:     ${{ secrets.TENANT_ID }}
 
 jobs:
   # ====================== DEV ======================
@@ -36,26 +37,14 @@ jobs:
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
           echo "🚀 Deploying all reports to DEV..."
-
           for file in reports/*.pbix; do
             if [ -f "$file" ]; then
               NAME=$(basename "$file" .pbix)
-              echo "========================================"
-              echo "DEPLOYING: $NAME"
-              echo "========================================"
-
-              RESPONSE=$(curl -s -w "\n==HTTP_STATUS==%{http_code}" \
+              echo "Deploying: $NAME"
+              curl -s -w "\n==HTTP_STATUS==%{http_code}" \
                 -X POST "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/imports?datasetDisplayName=$NAME&nameConflict=CreateOrOverwrite" \
                 -H "Authorization: Bearer $TOKEN" \
-                -F "file=@$file")
-
-              HTTP_STATUS=$(echo "$RESPONSE" | grep "==HTTP_STATUS==" | sed 's/==HTTP_STATUS==//')
-              
-              if [[ "$HTTP_STATUS" == 200 || "$HTTP_STATUS" == 202 ]]; then
-                echo "::notice::✅ $NAME deployed successfully"
-              else
-                echo "::error::❌ $NAME deployment failed"
-              fi
+                -F "file=@$file" | grep -E "(HTTP_STATUS|notice|error)"
             fi
           done
 
@@ -63,30 +52,19 @@ jobs:
         run: |
           TOKEN="${{ steps.auth.outputs.token }}"
           CONNECTION_ID="${{ secrets.DEV_CONNECTION_ID }}"
-
           for file in reports/*.pbix; do
             NAME=$(basename "$file" .pbix)
-            echo "🔧 Processing: $NAME"
-
+            echo "🔧 Processing DEV: $NAME"
             DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
               jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
+            if [ -z "$DATASET_ID" ]; then continue; fi
 
-            if [ -z "$DATASET_ID" ]; then
-              echo "::warning::Dataset not found: $NAME"
-              continue
-            fi
-
-            echo "Dataset ID: $DATASET_ID"
-
-            # TakeOver
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.TakeOver" \
               -H "Authorization: Bearer $TOKEN" -H "Content-Length: 0"
 
-            # Bind to SPN Cloud Connection
             if [ -n "$CONNECTION_ID" ]; then
-              echo "Binding to SPN Connection..."
               curl -s -X POST \
                 "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/Default.BindToGateway" \
                 -H "Authorization: Bearer $TOKEN" \
@@ -97,15 +75,13 @@ jobs:
                 }'
             fi
 
-            # Refresh
-            echo "Triggering refresh..."
             curl -s -o /dev/null -X POST \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets/$DATASET_ID/refreshes" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
               -d '{"notifyOption": "NoNotification"}'
 
-            echo "::notice::✅ $NAME processed successfully"
+            echo "::notice::✅ $NAME processed in DEV"
           done
 
   # ====================== UAT ======================
@@ -149,7 +125,6 @@ jobs:
           for file in reports/*.pbix; do
             NAME=$(basename "$file" .pbix)
             echo "🔧 Processing UAT: $NAME"
-            # (Same logic as DEV - copy the process_report block if you want)
             DATASET_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
               "https://api.powerbi.com/v1.0/myorg/groups/$WORKSPACE_ID/datasets" | \
               jq -r --arg n "$NAME" '.value[] | select(.name==$n) | .id')
